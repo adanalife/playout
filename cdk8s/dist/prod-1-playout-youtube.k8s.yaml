@@ -11,7 +11,7 @@ metadata:
 data:
   VIDEO_DIR: /opt/data/Dashcam/_all
   OUTPUT: rtsp
-  ENCODER: x264enc
+  ENCODER: vah264enc
   RTSP_URL: rtsp://mediamtx-youtube:8554/dashcam
 ---
 apiVersion: apps/v1
@@ -39,7 +39,7 @@ spec:
         app.kubernetes.io/instance: playout-youtube
         app.kubernetes.io/part-of: tripbot
       annotations:
-        adanalife.dev/config-hash: 96c9b6f5d0
+        adanalife.dev/config-hash: dfe520be2f
     spec:
       securityContext:
         seccompProfile:
@@ -64,8 +64,10 @@ spec:
             requests:
               cpu: "2"
               memory: 512Mi
+              gpu.intel.com/i915: "1"
             limits:
               memory: 4Gi
+              gpu.intel.com/i915: "1"
       volumes:
         - name: dashcam
           persistentVolumeClaim:
