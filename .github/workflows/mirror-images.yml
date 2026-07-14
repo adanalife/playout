@@ -1,0 +1,42 @@
+# Refreshes the GHCR mirrors of the Docker Hub base images the Dockerfile
+# builds FROM, so CI never pulls from Docker Hub at build time (Hub's pull
+# rate limit breaks builds; manifest GETs count against the quota even on
+# layer-cache hits). Same pattern as tripbot's mirror-images.yml.
+#
+# First run creates the packages linked to this repo; making them public is
+# a one-time org packages UI step (visibility → public).
+name: mirror-images
+
+on:
+  schedule:
+    - cron: "23 9 * * 1" # weekly, Monday morning UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # crane copies the manifest registry-to-registry; it reads the
+      # docker-config auth the login step wrote.
+      - name: Copy images Hub -> GHCR
+        run: |
+          set -euo pipefail
+          while read -r src dst; do
+            echo "::group::${src} -> ${dst}"
+            go run github.com/google/go-containerregistry/cmd/crane@latest copy "${src}" "${dst}"
+            echo "::endgroup::"
+          done <<'EOF'
+          docker.io/rust:1.97-trixie ghcr.io/adanalife/mirror/rust:1.97-trixie
+          docker.io/debian:trixie-slim ghcr.io/adanalife/mirror/debian:trixie-slim
+          EOF
