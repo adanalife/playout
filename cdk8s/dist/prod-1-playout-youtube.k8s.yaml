@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app: playout-youtube
+    app.kubernetes.io/instance: playout-youtube
+    app.kubernetes.io/name: playout
+    app.kubernetes.io/part-of: tripbot
+  name: playout-youtube-config
+  namespace: prod-1
+data:
+  VIDEO_DIR: /opt/data/Dashcam/_all
+  OUTPUT: rtsp
+  ENCODER: x264enc
+  RTSP_URL: rtsp://mediamtx-youtube:8554/dashcam
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: playout-youtube
+    app.kubernetes.io/instance: playout-youtube
+    app.kubernetes.io/name: playout
+    app.kubernetes.io/part-of: tripbot
+  name: playout-youtube
+  namespace: prod-1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: playout-youtube
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: playout-youtube
+        app.kubernetes.io/name: playout
+        app.kubernetes.io/instance: playout-youtube
+        app.kubernetes.io/part-of: tripbot
+      annotations:
+        adanalife.dev/config-hash: 96c9b6f5d0
+    spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: playout
+          image: ghcr.io/adanalife/playout:0.1.0 # x-release-please-version
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: playout-youtube-config
+          volumeMounts:
+            - name: dashcam
+              mountPath: /opt/data/Dashcam/_all
+              readOnly: true
+          resources:
+            requests:
+              cpu: "2"
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: dashcam
+          persistentVolumeClaim:
+            claimName: vlc-dashcam-local
+            readOnly: true
+      priorityClassName: prod-stream

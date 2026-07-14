@@ -2,7 +2,11 @@
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "packages": {
     ".": {
-      "release-type": "rust"
+      "release-type": "rust",
+      "extra-files": [
+        "cdk8s/versions.yaml",
+        "cdk8s/dist/prod-1-playout-youtube.k8s.yaml"
+      ]
     }
   }
 }

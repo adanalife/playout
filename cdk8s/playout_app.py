@@ -1,0 +1,170 @@
+"""PlayoutInstance — one playout deployment for a single streaming platform.
+
+`PlayoutInstance(platform="youtube", env=...)` emits `playout-youtube` objects
+(ConfigMap + Deployment) with an `app: playout-youtube` selector. playout
+publishes its stream INTO the per-platform MediaMTX relay (authored in infra),
+so there is no Service here — nothing dials playout. The HTTP surface
+(/vlc/current, health probes) arrives with the control-plane milestone and
+brings a Service + probes with it.
+
+Everything is cdk8s.ApiObject with literal specs — the same idiom as the obs
+repo, platform-gateway, and tripbot-console.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+
+import cdk8s
+from config import EnvConfig
+from constructs import Construct
+
+IMAGE = "ghcr.io/adanalife/playout"
+PART_OF = "tripbot"
+CONFIG_HASH_ANNOTATION = "adanalife.dev/config-hash"
+
+# Must match the path baked into the corpus PVs (vlc-server mounts the same
+# claims at the same path).
+DASHCAM_MOUNT = "/opt/data/Dashcam/_all"
+
+
+def _obj(
+    scope: Construct,
+    id: str,
+    *,
+    api_version: str,
+    kind: str,
+    name: str,
+    namespace: str,
+    labels: dict | None = None,
+    **body,
+):
+    """ApiObject takes only apiVersion/kind/metadata as props; other top-level
+    keys (spec, data, …) land via JsonPatch — the fleet's literal-spec idiom."""
+    metadata = {"name": name, "namespace": namespace}
+    if labels:
+        metadata["labels"] = labels
+    obj = cdk8s.ApiObject(
+        scope, id, api_version=api_version, kind=kind, metadata=metadata
+    )
+    for key, value in body.items():
+        obj.add_json_patch(cdk8s.JsonPatch.add(f"/{key}", value))
+    return obj
+
+
+class PlayoutInstance(Construct):
+    def __init__(
+        self,
+        scope: Construct,
+        platform: str,  # "twitch" | "youtube"
+        *,
+        env: EnvConfig,
+    ):
+        name = f"playout-{platform}"
+        super().__init__(scope, name)
+        ns = env.namespace
+
+        labels = {
+            "app": name,
+            "app.kubernetes.io/name": "playout",
+            "app.kubernetes.io/instance": name,
+            "app.kubernetes.io/part-of": PART_OF,
+        }
+
+        # --- ConfigMap ---
+        data = {
+            "VIDEO_DIR": DASHCAM_MOUNT,
+            "OUTPUT": "rtsp",
+            "ENCODER": env.encoder,
+            # Publish into the per-platform MediaMTX relay (same namespace);
+            # OBS reads from MediaMTX, so playout restarts never invalidate
+            # the OBS-facing endpoint.
+            "RTSP_URL": f"rtsp://mediamtx-{platform}:8554/dashcam",
+        }
+        cm_name = f"{name}-config"
+        _obj(
+            self,
+            "config",
+            api_version="v1",
+            kind="ConfigMap",
+            name=cm_name,
+            namespace=ns,
+            labels=labels,
+            data=data,
+        )
+        cfg_hash = hashlib.sha256(
+            json.dumps(data, sort_keys=True).encode()
+        ).hexdigest()[:10]
+
+        # --- resources (+ iGPU claim for VAAPI encode) ---
+        # The CPU request is the CFS weight under contention — the minipc
+        # co-tenants two OBS encoders and the batch pipeline, so prod sizes
+        # this for real.
+        requests: dict[str, str] = {"cpu": env.cpu_request, "memory": "256Mi"}
+        limits: dict[str, str] = {"memory": "1Gi"}
+        if env.gpu:
+            requests["gpu.intel.com/i915"] = "1"
+            limits["gpu.intel.com/i915"] = "1"
+
+        container = {
+            "name": "playout",
+            "image": f"{IMAGE}:{env.tag_for('playout')}",
+            "imagePullPolicy": env.pull_policy_for("playout"),
+            "securityContext": {
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+            },
+            "envFrom": [{"configMapRef": {"name": cm_name}}],
+            "volumeMounts": [
+                {
+                    "name": "dashcam",
+                    "mountPath": DASHCAM_MOUNT,
+                    "readOnly": True,
+                }
+            ],
+            "resources": {"requests": requests, "limits": limits},
+            # No probes yet: the binary has no HTTP surface until the
+            # control-plane milestone. A pipeline error exits non-zero and
+            # the restartPolicy brings it back.
+        }
+
+        pod_spec: dict = {
+            "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+            "containers": [container],
+            "volumes": [
+                {
+                    "name": "dashcam",
+                    "persistentVolumeClaim": {
+                        "claimName": env.dashcam_claim,
+                        "readOnly": True,
+                    },
+                }
+            ],
+        }
+        if env.priority_class:
+            pod_spec["priorityClassName"] = env.priority_class
+
+        _obj(
+            self,
+            "deployment",
+            api_version="apps/v1",
+            kind="Deployment",
+            name=name,
+            namespace=ns,
+            labels=labels,
+            spec={
+                "replicas": 1,
+                "selector": {"matchLabels": {"app": name}},
+                # Recreate: two publishers racing on the same MediaMTX path
+                # would fight over it; one owner at a time.
+                "strategy": {"type": "Recreate"},
+                "template": {
+                    "metadata": {
+                        "labels": labels,
+                        "annotations": {CONFIG_HASH_ANNOTATION: cfg_hash},
+                    },
+                    "spec": pod_spec,
+                },
+            },
+        )
