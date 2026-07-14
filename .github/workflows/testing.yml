@@ -14,7 +14,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      # default profile: the minimal one omits clippy/rustfmt.
       - uses: jdx/mise-action@v4
+        env:
+          MISE_RUST_PROFILE: default
       - uses: Swatinem/rust-cache@v2
       - name: Install GStreamer
         run: |
