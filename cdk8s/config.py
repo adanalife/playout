@@ -57,6 +57,8 @@ ENVS: dict[str, EnvConfig] = {
         dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
         cpu_request="2",
         priority_class="prod-stream",
+        encoder="vah264enc",
+        gpu=True,
     ),
     "stage-1": EnvConfig(
         name="stage-1",

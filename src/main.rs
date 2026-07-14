@@ -64,6 +64,13 @@ fn make_encode_branch(encoder_name: &str, rtsp_url: &str) -> Result<Vec<gst::Ele
     parse.set_property("config-interval", -1i32);
     let sink = gst::ElementFactory::make("rtspclientsink").build()?;
     sink.set_property("location", rtsp_url);
+
+    if encoder_name == "vah264enc" {
+        // No special properties seem needed for VAAPI H.264 encoding; the
+        // defaults seem to work well, and bitrate is handled by the rate
+        // control properties on the encoder itself.
+    }
+
     Ok(vec![queue, encoder, parse, sink])
 }
 
@@ -177,9 +184,13 @@ fn main() -> Result<()> {
     // it rewrites each clip's segment so downstream running time never
     // resets, which is exactly what the encoder needs to stay unbroken.
     let concat = gst::ElementFactory::make("concat").build()?;
+    let q1 = gst::ElementFactory::make("queue").build()?;
     let convert = gst::ElementFactory::make("videoconvert").build()?;
+    let q2 = gst::ElementFactory::make("queue").build()?;
     let scale = gst::ElementFactory::make("videoscale").build()?;
+    let q3 = gst::ElementFactory::make("queue").build()?;
     let rate = gst::ElementFactory::make("videorate").build()?;
+    let q4 = gst::ElementFactory::make("queue").build()?;
     let caps = gst::ElementFactory::make("capsfilter").build()?;
     caps.set_property(
         "caps",
@@ -191,8 +202,12 @@ fn main() -> Result<()> {
     );
     let tee = gst::ElementFactory::make("tee").build()?;
 
-    pipeline.add_many([&concat, &convert, &scale, &rate, &caps, &tee])?;
-    gst::Element::link_many([&concat, &convert, &scale, &rate, &caps, &tee])?;
+    pipeline.add_many([
+        &concat, &q1, &convert, &q2, &scale, &q3, &rate, &q4, &caps, &tee,
+    ])?;
+    gst::Element::link_many([
+        &concat, &q1, &convert, &q2, &scale, &q3, &rate, &q4, &caps, &tee,
+    ])?;
 
     let mut branches = Vec::new();
     if output == "rtsp" || output == "both" {
