@@ -13,6 +13,9 @@ data:
   OUTPUT: rtsp
   ENCODER: x264enc
   RTSP_URL: rtsp://mediamtx-youtube:8554/dashcam
+  NATS_URL: nats://nats.stage-1-platform.svc.cluster.local:4222
+  ENV: staging
+  STREAM_PLATFORM: youtube
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -39,7 +42,7 @@ spec:
         app.kubernetes.io/instance: playout-youtube
         app.kubernetes.io/part-of: tripbot
       annotations:
-        adanalife.dev/config-hash: 96c9b6f5d0
+        adanalife.dev/config-hash: f6961f09cc
     spec:
       securityContext:
         seccompProfile:

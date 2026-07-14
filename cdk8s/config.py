@@ -26,6 +26,10 @@ class EnvConfig:
     namespace: str
     image_tag: str  # floating tag (main) for components without a pin
 
+    # tripbot env token in the NATS command subjects (tripbot.<nats_env>.vlc.*),
+    # matching what vlc-server and cmd/tripbot use — NOT the k8s env name.
+    nats_env: str = "development"
+
     # Platform instances to render. The A/B phase runs youtube only (the
     # unwatched stream); twitch joins at cutover.
     platforms: tuple[str, ...] = ("youtube",)
@@ -53,6 +57,7 @@ ENVS: dict[str, EnvConfig] = {
     "prod-1": EnvConfig(
         name="prod-1",
         namespace="prod-1",
+        nats_env="production",
         image_tag="latest",  # overridden by the versions.yaml pin
         dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
         cpu_request="2",
@@ -63,6 +68,7 @@ ENVS: dict[str, EnvConfig] = {
     "stage-1": EnvConfig(
         name="stage-1",
         namespace="stage-1",
+        nats_env="staging",
         image_tag="main",
         cpu_request="500m",
     ),
