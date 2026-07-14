@@ -14,10 +14,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      # default profile: the minimal one omits clippy/rustfmt.
       - uses: jdx/mise-action@v4
-        env:
-          MISE_RUST_PROFILE: default
+      # mise installs rust via rustup with a minimal profile; clippy is a
+      # separate component (and the mise cache can hold a component-less
+      # toolchain, so an env-var profile override is not enough).
+      - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install GStreamer
         run: |
