@@ -1,0 +1,16 @@
+# Changelog
+
+## [0.2.0](https://github.com/adanalife/playout/compare/playout-v0.1.0...playout-v0.2.0) (2026-07-14)
+
+
+### Features
+
+* cdk8s deploy authoring (playout-youtube, stage + prod) ([#4](https://github.com/adanalife/playout/issues/4)) ([ea70041](https://github.com/adanalife/playout/commit/ea7004138fdc9410669ae9386b5ab70b0a7aa9ee))
+* container image and release workflows ([#3](https://github.com/adanalife/playout/issues/3)) ([121b085](https://github.com/adanalife/playout/commit/121b0856d38a0f94394920e148970d0c8f9b7c66))
+* gapless playlist pipeline walking skeleton ([#1](https://github.com/adanalife/playout/issues/1)) ([cba93c1](https://github.com/adanalife/playout/commit/cba93c100605216fcbc3c4900ab524743f3cebd6))
+
+
+### Bug Fixes
+
+* **cdk8s:** raise playout memory limit to 4Gi ([#6](https://github.com/adanalife/playout/issues/6)) ([7ff8bde](https://github.com/adanalife/playout/commit/7ff8bdefa2b8cf995d61d2fcb16746fbf53c2842))
+* mediamtx Hub tags carry no v prefix ([#5](https://github.com/adanalife/playout/issues/5)) ([3abbded](https://github.com/adanalife/playout/commit/3abbdedc8a6b7727e198579bfd6ab8942c3e746a))

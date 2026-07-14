@@ -8,4 +8,4 @@
 # (the x-release-please-version marker anchors the replace); the release PR
 # re-synths cdk8s/dist to match. Don't hand-edit unless rolling back.
 prod-1:
-  playout: "0.1.0" # x-release-please-version
+  playout: "0.2.0" # x-release-please-version
