@@ -39,5 +39,5 @@ jobs:
           done <<'EOF'
           docker.io/rust:1.97-trixie ghcr.io/adanalife/mirror/rust:1.97-trixie
           docker.io/debian:trixie-slim ghcr.io/adanalife/mirror/debian:trixie-slim
-          docker.io/bluenviron/mediamtx:v1.19.2 ghcr.io/adanalife/mirror/mediamtx:v1.19.2
+          docker.io/bluenviron/mediamtx:1.19.2 ghcr.io/adanalife/mirror/mediamtx:1.19.2
           EOF
