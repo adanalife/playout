@@ -1,0 +1,23 @@
+name: pre-commit
+
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      # Installs the repo-pinned rust toolchain (.tool-versions) for the
+      # cargo-fmt hook.
+      - uses: jdx/mise-action@v4
+      # no-commit-to-branch guards local commits; in CI the checkout is the
+      # branch itself, so the hook would false-positive on main.
+      - uses: pre-commit/action@v3.0.1
+        env:
+          SKIP: no-commit-to-branch
