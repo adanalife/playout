@@ -8,6 +8,7 @@ use gst::prelude::*;
 use gstreamer as gst;
 
 mod http;
+mod nats;
 
 /// Clip rotation: sequential advance with wraparound.
 struct Playlist {
@@ -253,6 +254,7 @@ async fn main() -> Result<()> {
     player.spawn_clip(&second);
 
     tokio::spawn(http::run(player.clone()));
+    tokio::spawn(nats::run(player.clone()));
 
     let main_loop = glib::MainLoop::new(None, false);
 
