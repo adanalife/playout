@@ -1,0 +1,42 @@
+version: '3'
+
+tasks:
+  build:
+    desc: Build the playout binary
+    cmds:
+      - mise exec -- cargo build
+
+  test:
+    desc: Run tests
+    cmds:
+      - mise exec -- cargo test
+
+  lint:
+    desc: Clippy with warnings as errors (same gate as CI)
+    cmds:
+      - mise exec -- cargo clippy --all-targets -- -D warnings
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - mise exec -- cargo fmt --all
+
+  run:
+    desc: 'Run playout against a video dir (VIDEO_DIR=... task run)'
+    cmds:
+      - mise exec -- cargo run
+
+  mediamtx:
+    desc: Run a local MediaMTX (RTSP on :8554) for playout to publish into
+    cmds:
+      - mediamtx
+
+  probe:
+    desc: Watch the published stream's packets for boundary EOFs / PTS jumps
+    cmds:
+      - ffprobe -v warning -show_packets -select_streams v -i rtsp://localhost:8554/dashcam
+
+  play:
+    desc: Eyeball the published stream
+    cmds:
+      - ffplay -v warning rtsp://localhost:8554/dashcam

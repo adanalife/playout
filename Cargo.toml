@@ -1,0 +1,11 @@
+[package]
+name = "playout"
+version = "0.1.0"
+edition = "2024"
+description = "Gapless dashcam playout server: one long-lived encoder, RTSP out"
+license = "MIT"
+repository = "https://github.com/adanalife/playout"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
