@@ -9,3 +9,4 @@ publish = false
 
 [dependencies]
 anyhow = "1.0"
+gstreamer = "0.25"

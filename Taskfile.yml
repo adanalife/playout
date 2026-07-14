@@ -29,7 +29,7 @@ tasks:
   mediamtx:
     desc: Run a local MediaMTX (RTSP on :8554) for playout to publish into
     cmds:
-      - mediamtx
+      - mediamtx mediamtx.yml
 
   probe:
     desc: Watch the published stream's packets for boundary EOFs / PTS jumps

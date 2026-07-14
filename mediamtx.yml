@@ -1,0 +1,4 @@
+# Local-dev MediaMTX config: accept any publisher/reader on any path.
+# playout publishes rtsp://localhost:8554/dashcam here; OBS/ffplay read it.
+paths:
+  all_others:
