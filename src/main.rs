@@ -7,6 +7,8 @@ use gst::glib;
 use gst::prelude::*;
 use gstreamer as gst;
 
+mod http;
+
 /// Clip rotation: sequential advance with wraparound.
 struct Playlist {
     files: Vec<PathBuf>,
@@ -91,6 +93,8 @@ struct Player {
     clips: Mutex<Vec<gst::Element>>,
 }
 
+type SharedPlayer = Arc<Player>;
+
 impl Player {
     /// Add a decode bin for `uri` and link it into concat. The new clip
     /// prerolls immediately but its buffers block in concat until every
@@ -162,9 +166,18 @@ impl Player {
             active.send_event(gst::event::Eos::new());
         }
     }
+
+    fn current(&self) -> Option<String> {
+        self.clips
+            .lock()
+            .unwrap()
+            .first()
+            .and_then(|c| Some(c.property::<String>("uri")))
+    }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let video_dir = env_or("VIDEO_DIR", "/opt/data/Dashcam/_all");
     let output = env_or("OUTPUT", "rtsp"); // rtsp | window | both
     let rtsp_url = env_or("RTSP_URL", "rtsp://localhost:8554/dashcam");
@@ -226,7 +239,7 @@ fn main() -> Result<()> {
         tee.link(&branch[0])?;
     }
 
-    let player = Arc::new(Player {
+    let player: SharedPlayer = Arc::new(Player {
         pipeline: pipeline.clone(),
         concat,
         playlist: Mutex::new(Playlist { files, index: 0 }),
@@ -238,6 +251,8 @@ fn main() -> Result<()> {
     let second = player.playlist.lock().unwrap().next_uri();
     player.spawn_clip(&first);
     player.spawn_clip(&second);
+
+    tokio::spawn(http::run(player.clone()));
 
     let main_loop = glib::MainLoop::new(None, false);
 
