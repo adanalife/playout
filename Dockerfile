@@ -37,6 +37,7 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
     gstreamer1.0-rtsp \
+    gstreamer1.0-tools \
     intel-media-va-driver-non-free \
     libva2 \
     && rm -rf /var/lib/apt/lists/*
