@@ -1,0 +1,11 @@
+# Per-component image pins, keyed by env then image name.
+#
+# Envs/components listed here deploy the pinned release tag (rollback = git
+# revert the bump commit). Anything absent floats on EnvConfig.image_tag
+# (main on stage) with imagePullPolicy: Always.
+#
+# The prod-1 pin is bumped automatically by release-please at release time
+# (the x-release-please-version marker anchors the replace); the release PR
+# re-synths cdk8s/dist to match. Don't hand-edit unless rolling back.
+prod-1:
+  playout: "0.1.0" # x-release-please-version

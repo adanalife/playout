@@ -26,6 +26,11 @@ tasks:
     cmds:
       - mise exec -- cargo run
 
+  cdk8s:synth:
+    desc: Re-synthesize the committed k8s manifests in cdk8s/dist/
+    cmds:
+      - uv run --group cdk8s python cdk8s/main.py
+
   mediamtx:
     desc: Run a local MediaMTX (RTSP on :8554) for playout to publish into
     cmds:

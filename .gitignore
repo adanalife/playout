@@ -3,3 +3,4 @@
 # Self-signed certs MediaMTX generates beside its config on `task mediamtx`.
 auto.crt
 auto.key
+.venv/
