@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/adanalife/playout/compare/v0.2.0...v0.3.0) (2026-07-14)
+
+
+### Features
+
+* **playout:** Enable VAAPI encoding and add pipeline queues ([#9](https://github.com/adanalife/playout/issues/9)) ([02b9a6e](https://github.com/adanalife/playout/commit/02b9a6ea9a9e85e9f3c29a9c7fb4434496ca0e51))
+
+
+### Bug Fixes
+
+* **ci:** drop component prefix from release tags ([#7](https://github.com/adanalife/playout/issues/7)) ([2276382](https://github.com/adanalife/playout/commit/22763825b8c81ef91b5b20e4de19e1314acd2e8f))
+
 ## [0.2.0](https://github.com/adanalife/playout/compare/playout-v0.1.0...playout-v0.2.0) (2026-07-14)
 
 
