@@ -1,21 +1,15 @@
 use crate::SharedPlayer;
-use axum::{Json, Router, extract::State, response::IntoResponse, routing::get};
-use serde::Serialize;
+use axum::{Router, extract::State, response::IntoResponse, routing::get};
 use std::net::SocketAddr;
-
-#[derive(Serialize)]
-struct CurrentClip {
-    uri: Option<String>,
-}
 
 async fn health() -> impl IntoResponse {
     (axum::http::StatusCode::OK, "OK")
 }
 
-async fn current(State(player): State<SharedPlayer>) -> Json<CurrentClip> {
-    Json(CurrentClip {
-        uri: player.current(),
-    })
+/// Wire-compatible with vlc-server: plain-text basename of the current clip
+/// (what tripbot's vlc-client reads verbatim), empty string when idle.
+async fn current(State(player): State<SharedPlayer>) -> String {
+    player.current_basename().unwrap_or_default()
 }
 
 pub async fn run(player: SharedPlayer) {

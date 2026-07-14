@@ -1,6 +1,8 @@
+use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use gst::glib;
@@ -9,23 +11,6 @@ use gstreamer as gst;
 
 mod http;
 mod nats;
-
-/// Clip rotation: sequential advance with wraparound.
-struct Playlist {
-    files: Vec<PathBuf>,
-    index: usize,
-}
-
-impl Playlist {
-    fn uri_at(&self, index: usize) -> String {
-        format!("file://{}", self.files[index].display())
-    }
-
-    fn next_uri(&mut self) -> String {
-        self.index = (self.index + 1) % self.files.len();
-        self.uri_at(self.index)
-    }
-}
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -68,12 +53,6 @@ fn make_encode_branch(encoder_name: &str, rtsp_url: &str) -> Result<Vec<gst::Ele
     let sink = gst::ElementFactory::make("rtspclientsink").build()?;
     sink.set_property("location", rtsp_url);
 
-    if encoder_name == "vah264enc" {
-        // No special properties seem needed for VAAPI H.264 encoding; the
-        // defaults seem to work well, and bitrate is handled by the rate
-        // control properties on the encoder itself.
-    }
-
     Ok(vec![queue, encoder, parse, sink])
 }
 
@@ -84,28 +63,94 @@ fn make_window_branch() -> Result<Vec<gst::Element>> {
     Ok(vec![queue, convert, sink])
 }
 
+/// A live decode bin plus the bookkeeping a playback command needs: which
+/// playlist entry it is, the concat pad it feeds, the offset it started at,
+/// and the output running time it went active (for the playhead position).
+struct Clip {
+    bin: gst::Element,
+    /// concat sink pad, set once the decode bin exposes its src pad.
+    pad: Option<gst::Pad>,
+    index: usize,
+    /// Seek offset this clip started at, ms (0 = top of clip).
+    offset_ms: i64,
+    /// Output running time when this clip became active; None until promoted.
+    start_rt: Option<gst::ClockTime>,
+}
+
 /// Everything the clip-spawning path needs to hang on to. Clip bins come and
 /// go at every boundary; the pipeline, concat, and playlist live forever.
 struct Player {
     pipeline: gst::Pipeline,
     concat: gst::Element,
-    playlist: Mutex<Playlist>,
+    /// Immutable playlist, sorted. Commands index into this.
+    files: Vec<PathBuf>,
     /// Live clip bins in play order: `[active, prerolled-next]`.
-    clips: Mutex<Vec<gst::Element>>,
+    clips: Mutex<Vec<Clip>>,
 }
 
 type SharedPlayer = Arc<Player>;
 
+/// Playlist index `n` clips forward of `active`, wrapping. n<1 is treated as 1.
+fn skip_index(active: usize, n: i32, len: usize) -> usize {
+    (active + (n.max(1) as usize)) % len
+}
+
+/// Playlist index `n` clips back of `active`, wrapping. n<1 is treated as 1.
+fn back_index(active: usize, n: i32, len: usize) -> usize {
+    let n = (n.max(1) as usize) % len;
+    (active + len - n) % len
+}
+
 impl Player {
-    /// Add a decode bin for `uri` and link it into concat. The new clip
-    /// prerolls immediately but its buffers block in concat until every
+    fn uri_at(&self, index: usize) -> String {
+        format!("file://{}", self.files[index].display())
+    }
+
+    fn basename_at(&self, index: usize) -> String {
+        self.files[index]
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Playlist index of the clip whose basename matches `name`, if any.
+    fn find(&self, name: &str) -> Option<usize> {
+        self.files
+            .iter()
+            .position(|p| p.file_name().and_then(|n| n.to_str()) == Some(name))
+    }
+
+    // ponytail: stdlib RNG via RandomState's seeded hasher — good enough to
+    // pick a clip, no `rand` crate. Upgrade to `rand` only if distribution
+    // quality ever matters here (it won't for "play a random dashcam clip").
+    fn random_index(&self) -> usize {
+        let r = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
+        (r % self.files.len() as u64) as usize
+    }
+
+    fn active_index(&self) -> usize {
+        self.clips
+            .lock()
+            .unwrap()
+            .first()
+            .map(|c| c.index)
+            .unwrap_or(0)
+    }
+
+    /// Add a decode bin for playlist `index` and link it into concat. The new
+    /// clip prerolls immediately but its buffers block in concat until every
     /// earlier pad has finished — that blocking is what makes the splice
-    /// gapless. On EOS the bin tears itself down and spawns the successor,
-    /// so the pipeline always holds the active clip plus the prerolled next.
-    fn spawn_clip(self: &Arc<Self>, uri: &str) {
-        println!("spawning {uri}");
+    /// gapless. On EOS the bin tears itself down and spawns the successor, so
+    /// the pipeline always holds the active clip plus the prerolled next.
+    /// `offset_ms` seeks the clip before concat reaches it (play.at / resume).
+    fn spawn(self: &Arc<Self>, index: usize, offset_ms: i64) {
+        let uri = self.uri_at(index);
+        println!("spawning [{index}] {uri} (offset {offset_ms}ms)");
         let decode = gst::ElementFactory::make("uridecodebin3")
-            .property("uri", uri)
+            .property("uri", &uri)
             .build()
             .expect("creating uridecodebin3");
 
@@ -125,6 +170,31 @@ impl Player {
                 .expect("requesting concat pad");
             pad.link(&sinkpad).expect("linking clip into concat");
 
+            // Record the pad so a command can release it when redirecting.
+            if let Some(clip) = player
+                .clips
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|c| &c.bin == decode)
+            {
+                clip.pad = Some(sinkpad.clone());
+            }
+
+            // Best-effort seek for play.at / resume: position the source before
+            // concat switches to it. A refused seek falls back to top-of-clip.
+            // ponytail: the mid-stream seek path needs a stage soak — it can't
+            // be exercised without the corpus + a live pipeline.
+            if offset_ms > 0 {
+                let pos = gst::ClockTime::from_mseconds(offset_ms as u64);
+                if decode
+                    .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, pos)
+                    .is_err()
+                {
+                    eprintln!("seek to {offset_ms}ms refused; starting clip at top");
+                }
+            }
+
             // EOS on this pad = clip finished and concat has moved on: tear
             // down the finished bin off the streaming thread and top up.
             let player = Arc::clone(&player);
@@ -139,14 +209,7 @@ impl Player {
                 let player = Arc::clone(&player);
                 let decode = decode.clone();
                 let pad = pad.clone();
-                glib::idle_add_once(move || {
-                    player.clips.lock().unwrap().retain(|c| c != &decode);
-                    decode.set_state(gst::State::Null).ok();
-                    player.pipeline.remove(&decode).ok();
-                    player.concat.release_request_pad(&pad);
-                    let uri = player.playlist.lock().unwrap().next_uri();
-                    player.spawn_clip(&uri);
-                });
+                glib::idle_add_once(move || player.on_clip_eos(&decode, &pad));
                 // Drop the EOS: concat handles pad switching itself, and the
                 // pipeline-level EOS must never fire (24/7 stream).
                 gst::PadProbeReturn::Drop
@@ -155,25 +218,126 @@ impl Player {
 
         self.pipeline.add(&decode).expect("adding clip bin");
         decode.sync_state_with_parent().expect("starting clip bin");
-        self.clips.lock().unwrap().push(decode);
+        self.clips.lock().unwrap().push(Clip {
+            bin: decode,
+            pad: None,
+            index,
+            offset_ms,
+            start_rt: None,
+        });
     }
 
-    /// The !timewarp analogue: finish the active clip *now*. Its EOS probe
-    /// then promotes the already-prerolled next clip through the same
-    /// long-lived encoder — same mechanism as a natural boundary.
+    /// Natural boundary: the finished bin's EOS reached concat, which has
+    /// already switched to the prerolled clip. Tear the finished bin down,
+    /// stamp the promoted clip active, and preroll its sequential successor.
+    fn on_clip_eos(self: &Arc<Self>, decode: &gst::Element, pad: &gst::Pad) {
+        self.clips.lock().unwrap().retain(|c| &c.bin != decode);
+        decode.set_state(gst::State::Null).ok();
+        self.pipeline.remove(decode).ok();
+        self.concat.release_request_pad(pad);
+        self.mark_active();
+        let next = self
+            .clips
+            .lock()
+            .unwrap()
+            .first()
+            .map(|c| (c.index + 1) % self.files.len());
+        if let Some(next) = next {
+            self.spawn(next, 0);
+        }
+    }
+
+    /// Stamp the current active clip (clips[0]) with the output running time it
+    /// went live, so the playhead can report position within the clip.
+    fn mark_active(&self) {
+        let rt = self.pipeline.query_position::<gst::ClockTime>();
+        if let Some(active) = self.clips.lock().unwrap().first_mut() {
+            active.start_rt = rt.or(Some(gst::ClockTime::ZERO));
+        }
+    }
+
+    /// Tear down the prerolled clip(s) behind the active one, releasing their
+    /// concat pads — so a following `spawn` becomes concat's next pad.
+    fn teardown_preroll(&self) {
+        let extra: Vec<Clip> = self.clips.lock().unwrap().drain(1..).collect();
+        for c in extra {
+            c.bin.set_state(gst::State::Null).ok();
+            self.pipeline.remove(&c.bin).ok();
+            if let Some(pad) = c.pad {
+                self.concat.release_request_pad(&pad);
+            }
+        }
+    }
+
+    /// Redirect playback to `index` (optionally seeked): swap it in as the
+    /// prerolled clip, then finish the active clip so concat cuts straight to
+    /// it through the same long-lived encoder.
+    fn play_index(self: &Arc<Self>, index: usize, offset_ms: i64) {
+        self.teardown_preroll();
+        self.spawn(index, offset_ms);
+        self.jump();
+    }
+
+    fn play_random(self: &Arc<Self>) {
+        self.play_index(self.random_index(), 0);
+    }
+
+    fn play_file(self: &Arc<Self>, name: &str) {
+        match self.find(name) {
+            Some(i) => self.play_index(i, 0),
+            None => eprintln!("play.file: {name} not in playlist"),
+        }
+    }
+
+    fn play_at(self: &Arc<Self>, name: &str, position_ms: i64) {
+        match self.find(name) {
+            Some(i) => self.play_index(i, position_ms),
+            None => eprintln!("play.at: {name} not in playlist"),
+        }
+    }
+
+    fn skip(self: &Arc<Self>, n: i32) {
+        let i = skip_index(self.active_index(), n, self.files.len());
+        self.play_index(i, 0);
+    }
+
+    fn back(self: &Arc<Self>, n: i32) {
+        let i = back_index(self.active_index(), n, self.files.len());
+        self.play_index(i, 0);
+    }
+
+    /// The stdin `j` analogue: finish the active clip *now*. Its EOS probe
+    /// promotes the already-prerolled next clip through the same long-lived
+    /// encoder — same mechanism as a natural boundary.
     fn jump(&self) {
-        let active = self.clips.lock().unwrap().first().cloned();
+        let active = self.clips.lock().unwrap().first().map(|c| c.bin.clone());
         if let Some(active) = active {
             active.send_event(gst::event::Eos::new());
         }
     }
 
-    fn current(&self) -> Option<String> {
-        self.clips
-            .lock()
-            .unwrap()
-            .first()
-            .and_then(|c| Some(c.property::<String>("uri")))
+    /// Basename of the active clip (`2018_0704_120000.MP4`), matching what
+    /// vlc-server reports over `/vlc/current`. None when nothing is playing.
+    fn current_basename(&self) -> Option<String> {
+        let index = self.clips.lock().unwrap().first()?.index;
+        Some(self.basename_at(index))
+    }
+
+    /// Current clip basename + playback position (ms) for the lastplayed
+    /// last-value cache. Position = start offset + time since the clip went
+    /// active; falls back to the offset alone before the pipeline reports one.
+    fn playhead(&self) -> Option<(String, i64)> {
+        let clips = self.clips.lock().unwrap();
+        let active = clips.first()?;
+        let basename = self.basename_at(active.index);
+        let now = self.pipeline.query_position::<gst::ClockTime>();
+        let position_ms = match (now, active.start_rt) {
+            (Some(now), Some(start)) => {
+                active.offset_ms + (now.mseconds() as i64 - start.mseconds() as i64).max(0)
+            }
+            _ => active.offset_ms,
+        };
+        Some((basename, position_ms))
     }
 }
 
@@ -183,6 +347,9 @@ async fn main() -> Result<()> {
     let output = env_or("OUTPUT", "rtsp"); // rtsp | window | both
     let rtsp_url = env_or("RTSP_URL", "rtsp://localhost:8554/dashcam");
     let encoder_name = env_or("ENCODER", "x264enc");
+    let nats_env = env_or("ENV", "development");
+    let platform = env_or("STREAM_PLATFORM", "youtube");
+    let nats_url = env_or("NATS_URL", "nats://localhost:4222");
 
     let files = scan_video_dir(&video_dir)?;
     println!(
@@ -243,22 +410,34 @@ async fn main() -> Result<()> {
     let player: SharedPlayer = Arc::new(Player {
         pipeline: pipeline.clone(),
         concat,
-        playlist: Mutex::new(Playlist { files, index: 0 }),
+        files,
         clips: Mutex::new(Vec::new()),
     });
 
+    // Control plane is best-effort: if NATS is down, playout still loops the
+    // corpus — it just can't be commanded or resume its exact spot.
+    let control = nats::connect(nats_env, platform, nats_url)
+        .await
+        .map(Arc::new);
+    let resume = match &control {
+        Some(c) => c.resume_target(&player).await,
+        None => None,
+    };
+
     // Active clip + prerolled next; every EOS tops the pair back up.
-    let first = player.playlist.lock().unwrap().uri_at(0);
-    let second = player.playlist.lock().unwrap().next_uri();
-    player.spawn_clip(&first);
-    player.spawn_clip(&second);
+    let (first, offset) = resume.unwrap_or((0, 0));
+    player.spawn(first, offset);
+    player.spawn((first + 1) % player.files.len(), 0);
 
     tokio::spawn(http::run(player.clone()));
-    tokio::spawn(nats::run(player.clone()));
+    if let Some(control) = control {
+        tokio::spawn(control.clone().run_commands(player.clone()));
+        tokio::spawn(control.run_ticker(player.clone(), Duration::from_secs(5)));
+    }
 
     let main_loop = glib::MainLoop::new(None, false);
 
-    // stdin commands: `j` = jump to a far-away clip, `q` = clean shutdown.
+    // stdin commands: `j` = jump to the prerolled clip, `q` = clean shutdown.
     // EOF is ignored so a detached stdin (a container) doesn't stop playback.
     let player_stdin = Arc::clone(&player);
     let loop_stdin = main_loop.clone();
@@ -305,6 +484,7 @@ async fn main() -> Result<()> {
     })?;
 
     pipeline.set_state(gst::State::Playing)?;
+    player.mark_active();
     main_loop.run();
     pipeline.set_state(gst::State::Null)?;
 
@@ -312,4 +492,26 @@ async fn main() -> Result<()> {
         bail!("pipeline failed");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{back_index, skip_index};
+
+    #[test]
+    fn skip_wraps_and_floors_to_one() {
+        assert_eq!(skip_index(0, 1, 5), 1);
+        assert_eq!(skip_index(3, 3, 5), 1); // 3+3=6 % 5
+        assert_eq!(skip_index(4, 1, 5), 0); // wrap
+        assert_eq!(skip_index(2, 0, 5), 3); // n<1 treated as 1
+        assert_eq!(skip_index(2, -4, 5), 3);
+    }
+
+    #[test]
+    fn back_wraps_and_floors_to_one() {
+        assert_eq!(back_index(1, 1, 5), 0);
+        assert_eq!(back_index(0, 1, 5), 4); // wrap
+        assert_eq!(back_index(2, 3, 5), 4); // 2-3 mod 5
+        assert_eq!(back_index(3, 0, 5), 2); // n<1 treated as 1
+    }
 }
