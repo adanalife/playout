@@ -4,3 +4,4 @@
 auto.crt
 auto.key
 .venv/
+__pycache__/

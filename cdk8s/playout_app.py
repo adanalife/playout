@@ -101,8 +101,13 @@ class PlayoutInstance(Construct):
         # The CPU request is the CFS weight under contention — the minipc
         # co-tenants two OBS encoders and the batch pipeline, so prod sizes
         # this for real.
-        requests: dict[str, str] = {"cpu": env.cpu_request, "memory": "256Mi"}
-        limits: dict[str, str] = {"memory": "1Gi"}
+        # Memory: full decode → scale/rate → x264 encode of two concurrent
+        # 1080p60 clips (active + prerolled next) — nothing like libvlc's
+        # stream-copy vlc-server. 1Gi OOM-killed during preroll on the real
+        # corpus. ponytail: 4Gi ceiling is provisional; tune down once steady
+        # RSS is measured on stage.
+        requests: dict[str, str] = {"cpu": env.cpu_request, "memory": "512Mi"}
+        limits: dict[str, str] = {"memory": "4Gi"}
         if env.gpu:
             requests["gpu.intel.com/i915"] = "1"
             limits["gpu.intel.com/i915"] = "1"
