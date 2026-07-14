@@ -43,6 +43,12 @@ repos:
     hooks:
       - id: actionlint
 
+  # Dockerfile linting.
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.14.0
+    hooks:
+      - id: hadolint-docker
+
   # Rust formatting. Wrapped in `mise exec` so it resolves the repo-pinned
   # toolchain on hosts where mise isn't activated in the hook's shell.
   # Clippy stays in CI (testing.yml) — a full build is too slow for a hook.
