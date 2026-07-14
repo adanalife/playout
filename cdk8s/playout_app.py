@@ -81,6 +81,11 @@ class PlayoutInstance(Construct):
             # OBS reads from MediaMTX, so playout restarts never invalidate
             # the OBS-facing endpoint.
             "RTSP_URL": f"rtsp://mediamtx-{platform}:8554/dashcam",
+            # Control plane: NATS commands + lastplayed resume, wire-compatible
+            # with vlc-server. NATS runs in the <env>-platform namespace.
+            "NATS_URL": f"nats://nats.{env.name}-platform.svc.cluster.local:4222",
+            "ENV": env.nats_env,
+            "STREAM_PLATFORM": platform,
         }
         cm_name = f"{name}-config"
         _obj(
