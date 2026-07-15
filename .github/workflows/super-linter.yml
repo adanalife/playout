@@ -1,0 +1,68 @@
+---
+name: super-linter
+
+# Weekly sweep + on-demand, not a per-PR gate: pre-commit and testing.yml
+# (clippy) already cover the per-PR lint surface; super-linter catches the
+# long-tail validators on a schedule instead of burning minutes on every push.
+on:
+  schedule:
+    - cron: '27 9 * * 1' # Mondays 09:27 UTC
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Run Linters
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # fetch-depth: 0 is required by super-linter: it diffs against the
+      # default branch to figure out which files changed, which means main
+      # has to be present in the local checkout.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: run-linters
+        uses: super-linter/super-linter@v8
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No PR diff to scope to on a schedule — lint the whole tree.
+          VALIDATE_ALL_CODEBASE: true
+          ENABLE_GITHUB_PULL_REQUEST_SUMMARY_COMMENT: false
+          # Machine-owned artifacts: synth output is golden-gated by
+          # cdk8s-synth.yml; the lockfiles are machine-generated (and their
+          # hashes trip codespell).
+          FILTER_REGEX_EXCLUDE: '.*cdk8s/dist/.*|.*(^|/)uv\.lock$|.*(^|/)Cargo\.lock$'
+          # Rust formatting lives in .pre-commit-config.yaml (cargo fmt) and
+          # clippy runs in testing.yml against the repo-pinned toolchain with
+          # GStreamer present — super-linter's Rust gates would duplicate them
+          # without the system deps the build needs.
+          VALIDATE_RUST_2015: false
+          VALIDATE_RUST_2018: false
+          VALIDATE_RUST_2021: false
+          VALIDATE_RUST_CLIPPY: false
+          # Dockerfile linting lives in .pre-commit-config.yaml (hadolint hook).
+          VALIDATE_DOCKERFILE_HADOLINT: false
+          # disabled cause they dont support CRDs rn
+          VALIDATE_KUBERNETES_KUBECONFORM: false
+          # disabled until we go through and fix the issues (matches tripbot)
+          VALIDATE_JSCPD: false
+          VALIDATE_ENV: false
+          VALIDATE_CHECKOV: false
+          VALIDATE_GITHUB_ACTIONS_ZIZMOR: false
+          VALIDATE_JSON_PRETTIER: false
+          VALIDATE_MARKDOWN_PRETTIER: false
+          VALIDATE_NATURAL_LANGUAGE: false
+          VALIDATE_SHELL_SHFMT: false
+          VALIDATE_TRIVY: false
+          VALIDATE_YAML_PRETTIER: false
+          # Ruff (PYTHON_RUFF, on) is the one Python linter for cdk8s/ —
+          # nothing else in the repo lints Python. Disable the super-linter
+          # Python gates that overlap with or contradict it (dueling
+          # formatters, redundant checkers), matching the fleet pattern.
+          VALIDATE_PYTHON_BLACK: false
+          VALIDATE_PYTHON_RUFF_FORMAT: false
+          VALIDATE_PYTHON_MYPY: false
+          VALIDATE_PYTHON_PYLINT: false
+          VALIDATE_PYTHON_FLAKE8: false
+          VALIDATE_PYTHON_ISORT: false
