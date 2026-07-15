@@ -48,6 +48,9 @@ jobs:
           context: .
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            SHA=${{ github.sha }}
           push: true
           cache-from: type=gha,scope=playout
           cache-to: type=gha,mode=max,scope=playout

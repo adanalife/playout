@@ -12,6 +12,22 @@ use gstreamer as gst;
 mod http;
 mod nats;
 
+/// Build identity served at /version (the fleet-wide version-discovery
+/// contract). Release images stamp VERSION/SHA via Docker build-args and
+/// BUILT_AT at image build; plain cargo builds fall back to the crate version.
+pub const VERSION: &str = match option_env!("VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+pub const SHA: &str = match option_env!("SHA") {
+    Some(s) => s,
+    None => "unknown",
+};
+pub const BUILT_AT: &str = match option_env!("BUILT_AT") {
+    Some(t) => t,
+    None => "unknown",
+};
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -343,6 +359,8 @@ impl Player {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    println!("playout version {VERSION} (sha: {SHA})");
+
     let video_dir = env_or("VIDEO_DIR", "/opt/data/Dashcam/_all");
     let output = env_or("OUTPUT", "rtsp"); // rtsp | window | both
     let rtsp_url = env_or("RTSP_URL", "rtsp://localhost:8554/dashcam");
@@ -353,8 +371,7 @@ async fn main() -> Result<()> {
 
     let files = scan_video_dir(&video_dir)?;
     println!(
-        "playout {}: {} clips in {video_dir}, output={output} encoder={encoder_name}",
-        env!("CARGO_PKG_VERSION"),
+        "{} clips in {video_dir}, output={output} encoder={encoder_name}",
         files.len(),
     );
 
