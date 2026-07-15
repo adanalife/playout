@@ -62,8 +62,6 @@ ENVS: dict[str, EnvConfig] = {
         dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
         cpu_request="2",
         priority_class="prod-stream",
-        encoder="vah264enc",
-        gpu=True,
     ),
     "stage-1": EnvConfig(
         name="stage-1",
@@ -71,12 +69,9 @@ ENVS: dict[str, EnvConfig] = {
         nats_env="staging",
         image_tag="main",
         # Mirror prod's encode path and CFS weight so the stage realtime soak
-        # transfers: VAAPI on the shared iGPU, same CPU request. The i915 claim
-        # also pins the pod to the minipc (the rpi5 advertises no i915) and is
-        # counted by stage-1's co-tenant ResourceQuota, so scaling up too many
-        # stage claimants parks pods Pending instead of degrading prod.
+        # transfers: x264 on CPU, same CPU request. Both envs default to the
+        # CPU encoder — the iGPU carries only the two OBS encoders (a 4th
+        # VAAPI session saturated it and dropped ~90% of output frames).
         cpu_request="2",
-        encoder="vah264enc",
-        gpu=True,
     ),
 }
