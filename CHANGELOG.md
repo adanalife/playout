@@ -2,6 +2,18 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.7.0] — 2026-07-15
+
+### Added
+
+- prod-1 renders a `playout-twitch` instance alongside youtube — the second (and last) platform ahead of the vlc-server cutover. Publishes into `mediamtx-twitch`; same VAAPI/iGPU/priority shape as youtube. ([#38](https://github.com/adanalife/playout/pull/38))
+- `ENCODER=passthrough`: publish the corpus's compressed H.264 straight to MediaMTX with no decode and no re-encode — the uniform corpus spec (identical params, IDR-leading closed 2s GOPs) makes compressed splicing safe. Resume/play.at seeks snap to the keyframe at/before the target (≤2s early). Stage runs passthrough as the soak bed; prod stays on x264 until it proves out. ([#43](https://github.com/adanalife/playout/pull/43))
+
+### Fixed
+
+- Track the prod-1 playout-twitch dist manifest in release-please `extra-files` so its image pin is bumped at release time alongside the youtube instance. ([#40](https://github.com/adanalife/playout/pull/40))
+- Encode with x264 on CPU instead of VAAPI — a 4th concurrent VAAPI session saturated the iGPU and dropped ~90% of OBS output frames; the minipc has ample CPU headroom. Pods pin to the minipc via nodeSelector (the i915 claim used to do this as a side effect). ([#42](https://github.com/adanalife/playout/pull/42), [#43](https://github.com/adanalife/playout/pull/43))
+
 ## [v0.6.1] — 2026-07-15
 
 ### Added
