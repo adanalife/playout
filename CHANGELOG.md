@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0](https://github.com/adanalife/playout/compare/v0.4.0...v0.5.0) (2026-07-15)
+
+
+### Features
+
+* add /version endpoint ([#18](https://github.com/adanalife/playout/issues/18)) ([b5332dc](https://github.com/adanalife/playout/commit/b5332dc4303ea08baec3f58ea8f270603e3133f0))
+* graceful shutdown on SIGTERM ([#20](https://github.com/adanalife/playout/issues/20)) ([619f33e](https://github.com/adanalife/playout/commit/619f33e8fa2e877b703d3717ccec39ac2d401567))
+* split /health into /health/live and /health/ready ([#16](https://github.com/adanalife/playout/issues/16)) ([4c0b4bb](https://github.com/adanalife/playout/commit/4c0b4bb5477b96112b2dfe4daa2c70a27823f33b))
+* structured logging via tracing ([#15](https://github.com/adanalife/playout/issues/15)) ([d83cd9c](https://github.com/adanalife/playout/commit/d83cd9c0063fd67c5784dce5c56d152493810ce3))
+
+
+### Bug Fixes
+
+* seek resume offset before linking the clip into concat ([#17](https://github.com/adanalife/playout/issues/17)) ([de4eaf7](https://github.com/adanalife/playout/commit/de4eaf74f25e0dd0b1fbc044e7f79b67a409d775))
+* subscribe per-platform leafed NATS command subjects ([#21](https://github.com/adanalife/playout/issues/21)) ([242110e](https://github.com/adanalife/playout/commit/242110e11968cc8bf8e188f010600f44145e829a))
+
 ## [0.4.0](https://github.com/adanalife/playout/compare/v0.3.0...v0.4.0) (2026-07-15)
 
 
