@@ -28,6 +28,34 @@ CONFIG_HASH_ANNOTATION = "adanalife.dev/config-hash"
 # claims at the same path).
 DASHCAM_MOUNT = "/opt/data/Dashcam/_all"
 
+# SM container holding playout's Sentry DSN, JSON shape {"SENTRY_DSN": "…"}.
+# Created on the infra side. One Sentry project per component; envs are
+# separated by the SENTRY_ENVIRONMENT tag (= ENV in the binary), so the same
+# DSN serves stage + prod.
+SENTRY_SM_KEY = "/k8s/sentry-playout"
+SENTRY_SECRET = "sentry-playout"
+
+
+def emit_sentry(scope: Construct, env: EnvConfig) -> None:
+    """Per-namespace Sentry DSN secret, shared by every playout instance in
+    the namespace and envFrom'd by each (emit once per env). ESO extracts the
+    SM JSON into a Secret via the env's namespaced SecretStore."""
+    _obj(
+        scope,
+        "sentry",
+        api_version="external-secrets.io/v1",
+        kind="ExternalSecret",
+        name=SENTRY_SECRET,
+        namespace=env.namespace,
+        labels={"app.kubernetes.io/part-of": PART_OF},
+        spec={
+            "refreshInterval": "1h",
+            "secretStoreRef": {"name": "aws-parameterstore", "kind": "SecretStore"},
+            "target": {"name": SENTRY_SECRET, "creationPolicy": "Owner"},
+            "dataFrom": [{"extract": {"key": SENTRY_SM_KEY}}],
+        },
+    )
+
 
 def _obj(
     scope: Construct,
@@ -125,7 +153,12 @@ class PlayoutInstance(Construct):
                 "allowPrivilegeEscalation": False,
                 "capabilities": {"drop": ["ALL"]},
             },
-            "envFrom": [{"configMapRef": {"name": cm_name}}],
+            "envFrom": [
+                {"configMapRef": {"name": cm_name}},
+                # Sentry DSN. Optional so the pod starts before the
+                # ExternalSecret syncs; the binary no-ops without SENTRY_DSN.
+                {"secretRef": {"name": SENTRY_SECRET, "optional": True}},
+            ],
             "volumeMounts": [
                 {
                     "name": "dashcam",

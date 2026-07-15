@@ -16,7 +16,7 @@ import cdk8s
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import ENVS, _versions  # noqa: E402
-from playout_app import IMAGE, PlayoutInstance  # noqa: E402
+from playout_app import IMAGE, PlayoutInstance, emit_sentry  # noqa: E402
 
 # release-please bumps the pin in versions.yaml on each release; it also has
 # to bump the same tag in the committed dist/ that Argo applies, via a generic
@@ -41,9 +41,11 @@ def _stamp_release_please_markers() -> None:
 def main() -> None:
     app = cdk8s.App(outdir=str(Path(__file__).parent / "dist"))
     for env in ENVS.values():
-        for platform in env.platforms:
+        for i, platform in enumerate(env.platforms):
             chart = cdk8s.Chart(app, f"{env.name}-playout-{platform}")
             PlayoutInstance(chart, platform, env=env)
+            if i == 0:
+                emit_sentry(chart, env)  # once per namespace
     app.synth()
     _stamp_release_please_markers()
 

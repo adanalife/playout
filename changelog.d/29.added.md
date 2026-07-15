@@ -1,0 +1,1 @@
+Sentry error reporting: `tracing` ERROR events become Sentry events (WARN/INFO attach as breadcrumbs), tagged with the release and the `ENV` environment. Enabled by the `SENTRY_DSN` env var, delivered via a per-namespace ESO secret; local runs without it are unaffected.

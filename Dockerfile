@@ -37,6 +37,7 @@ FROM ghcr.io/adanalife/mirror/debian:trixie-slim
 RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
     /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
