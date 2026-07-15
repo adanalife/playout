@@ -1,11 +1,11 @@
 """PlayoutInstance — one playout deployment for a single streaming platform.
 
 `PlayoutInstance(platform="youtube", env=...)` emits `playout-youtube` objects
-(ConfigMap + Deployment) with an `app: playout-youtube` selector. playout
-publishes its stream INTO the per-platform MediaMTX relay (authored in infra),
-so there is no Service here — nothing dials playout. The HTTP surface
-(/vlc/current, health probes) arrives with the control-plane milestone and
-brings a Service + probes with it.
+(ConfigMap + Deployment + Service) with an `app: playout-youtube` selector.
+playout publishes its stream INTO the per-platform MediaMTX relay (authored
+in infra); the Service exposes only the HTTP control surface on :8080
+(/vlc/current for tripbot/console reads, health probes, /version) — the
+same name tripbot's `VLC_SERVER_HOST` points at after cutover.
 
 Everything is cdk8s.ApiObject with literal specs — the same idiom as the obs
 repo, platform-gateway, and tripbot-console.
@@ -23,6 +23,7 @@ from constructs import Construct
 IMAGE = "ghcr.io/adanalife/playout"
 PART_OF = "tripbot"
 CONFIG_HASH_ANNOTATION = "adanalife.dev/config-hash"
+HTTP_PORT = 8080  # the binary's HTTP_PORT default
 
 # Must match the path baked into the corpus PVs (vlc-server mounts the same
 # claims at the same path).
@@ -167,9 +168,20 @@ class PlayoutInstance(Construct):
                 }
             ],
             "resources": {"requests": requests, "limits": limits},
-            # No probes yet: the binary has no HTTP surface until the
-            # control-plane milestone. A pipeline error exits non-zero and
-            # the restartPolicy brings it back.
+            "ports": [{"name": "http", "containerPort": HTTP_PORT}],
+            "livenessProbe": {
+                "httpGet": {"path": "/health/live", "port": "http"},
+                "initialDelaySeconds": 5,
+                "periodSeconds": 10,
+            },
+            # Ready = pipeline PLAYING. Known ceiling: rtspclientsink in
+            # RECORD mode reports PLAYING without proving data flow, so a
+            # wedged-at-preroll pipeline still passes — the RTSP-DESCRIBE
+            # watchdog is the real dead-publish detector.
+            "readinessProbe": {
+                "httpGet": {"path": "/health/ready", "port": "http"},
+                "periodSeconds": 10,
+            },
         }
 
         pod_spec: dict = {
@@ -209,5 +221,22 @@ class PlayoutInstance(Construct):
                     },
                     "spec": pod_spec,
                 },
+            },
+        )
+
+        # The control-plane surface tripbot/console dial after cutover
+        # (VLC_SERVER_HOST=playout-<platform>). Stream data never transits
+        # this Service — that path is playout → MediaMTX over RTSP.
+        _obj(
+            self,
+            "service",
+            api_version="v1",
+            kind="Service",
+            name=name,
+            namespace=ns,
+            labels=labels,
+            spec={
+                "selector": {"app": name},
+                "ports": [{"name": "http", "port": HTTP_PORT, "targetPort": "http"}],
             },
         )
