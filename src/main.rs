@@ -103,6 +103,21 @@ fn back_index(active: usize, n: i32, len: usize) -> usize {
     (active + len - n) % len
 }
 
+/// Keeps a resume/play.at seek from landing in a clip's last moments — the
+/// clip would EOS almost immediately after the splice. An unknown duration
+/// errs toward seeking (matches vlc-server's tail guard).
+const SEEK_TAIL_GUARD_MS: i64 = 2000;
+
+fn should_seek_to(offset_ms: i64, duration_ms: Option<i64>) -> bool {
+    if offset_ms <= 0 {
+        return false;
+    }
+    match duration_ms {
+        Some(d) if d > 0 => offset_ms < d - SEEK_TAIL_GUARD_MS,
+        _ => true,
+    }
+}
+
 impl Player {
     fn uri_at(&self, index: usize) -> String {
         format!("file://{}", self.files[index].display())
@@ -166,13 +181,43 @@ impl Player {
 
         let player = Arc::clone(self);
         decode.connect_pad_added(move |decode, pad| {
+            // Best-effort seek for play.at / resume, BEFORE the pad links into
+            // concat: a FLUSH seek on a linked pad escapes into the shared
+            // chain mid-preroll and wedges it silently (no bus error); on an
+            // unlinked pad the flush stays inside this bin. Tail-guarded and
+            // refusal falls back to top-of-clip, like vlc-server.
+            // ponytail: the mid-stream seek path needs a stage soak — it can't
+            // be exercised without the corpus + a live pipeline.
+            let mut offset_ms = offset_ms;
+            if offset_ms > 0 {
+                let duration_ms = decode
+                    .query_duration::<gst::ClockTime>()
+                    .map(|d| d.mseconds() as i64);
+                if !should_seek_to(offset_ms, duration_ms) {
+                    info!(offset_ms, "seek lands at the clip tail; starting at top");
+                    offset_ms = 0;
+                }
+            }
+            if offset_ms > 0 {
+                let pos = gst::ClockTime::from_mseconds(offset_ms as u64);
+                if decode
+                    .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, pos)
+                    .is_err()
+                {
+                    warn!(offset_ms, "seek refused; starting clip at top");
+                    offset_ms = 0;
+                }
+            }
+
             let sinkpad = player
                 .concat
                 .request_pad_simple("sink_%u")
                 .expect("requesting concat pad");
             pad.link(&sinkpad).expect("linking clip into concat");
 
-            // Record the pad so a command can release it when redirecting.
+            // Record the pad so a command can release it when redirecting, and
+            // the offset the clip actually starts at (the guards above may
+            // have demoted a requested offset to top-of-clip).
             if let Some(clip) = player
                 .clips
                 .lock()
@@ -181,20 +226,7 @@ impl Player {
                 .find(|c| &c.bin == decode)
             {
                 clip.pad = Some(sinkpad.clone());
-            }
-
-            // Best-effort seek for play.at / resume: position the source before
-            // concat switches to it. A refused seek falls back to top-of-clip.
-            // ponytail: the mid-stream seek path needs a stage soak — it can't
-            // be exercised without the corpus + a live pipeline.
-            if offset_ms > 0 {
-                let pos = gst::ClockTime::from_mseconds(offset_ms as u64);
-                if decode
-                    .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, pos)
-                    .is_err()
-                {
-                    warn!(offset_ms, "seek refused; starting clip at top");
-                }
+                clip.offset_ms = offset_ms;
             }
 
             // EOS on this pad = clip finished and concat has moved on: tear
@@ -520,7 +552,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{back_index, skip_index};
+    use super::{back_index, should_seek_to, skip_index};
 
     #[test]
     fn skip_wraps_and_floors_to_one() {
@@ -529,6 +561,17 @@ mod tests {
         assert_eq!(skip_index(4, 1, 5), 0); // wrap
         assert_eq!(skip_index(2, 0, 5), 3); // n<1 treated as 1
         assert_eq!(skip_index(2, -4, 5), 3);
+    }
+
+    #[test]
+    fn seek_guards() {
+        assert!(!should_seek_to(0, Some(60_000))); // no offset
+        assert!(!should_seek_to(-5, Some(60_000)));
+        assert!(should_seek_to(30_000, Some(60_000))); // mid-clip
+        assert!(!should_seek_to(58_000, Some(60_000))); // tail guard
+        assert!(!should_seek_to(59_500, Some(60_000))); // past the end
+        assert!(should_seek_to(30_000, None)); // unknown duration errs toward seeking
+        assert!(should_seek_to(30_000, Some(0)));
     }
 
     #[test]
