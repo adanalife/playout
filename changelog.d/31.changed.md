@@ -1,0 +1,1 @@
+Startup matches vlc-server: a cold boot with no resume state plays a random clip instead of always the first, and the corpus scan walks subdirectories recursively. An empty corpus still exits loudly (deliberate divergence — a crash-looping pod beats a silent dead stream).
