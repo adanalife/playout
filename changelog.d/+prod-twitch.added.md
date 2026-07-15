@@ -1,0 +1,1 @@
+prod-1 renders a `playout-twitch` instance alongside youtube — the second (and last) platform ahead of the vlc-server cutover. Publishes into `mediamtx-twitch`; same VAAPI/iGPU/priority shape as youtube.
