@@ -12,6 +12,7 @@ use futures::StreamExt;
 use gst::glib;
 use gstreamer as gst;
 use serde::Deserialize;
+use tracing::{info, warn};
 
 use crate::SharedPlayer;
 
@@ -62,7 +63,7 @@ pub async fn connect(env: String, platform: String, url: String) -> Option<Contr
     let client = match async_nats::connect(&url).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("nats connect failed ({url}): {e}; control plane disabled");
+            warn!(err = %e, url = %url, "nats connect failed; control plane disabled");
             return None;
         }
     };
@@ -77,7 +78,7 @@ pub async fn connect(env: String, platform: String, url: String) -> Option<Contr
         ..Default::default()
     };
     if let Err(e) = js.create_stream(cfg).await {
-        eprintln!("ensure lastplayed stream failed: {e}");
+        warn!(err = %e, "ensure lastplayed stream failed");
     }
     Some(Control {
         client,
@@ -103,7 +104,7 @@ impl Control {
             .ok()?;
         let ev: LastPlayed = serde_json::from_slice(&msg.payload).ok()?;
         let index = player.find(&ev.file)?;
-        println!("resuming {} at {}ms", ev.file, ev.position_ms);
+        info!(file = %ev.file, position_ms = ev.position_ms, "resuming");
         Some((index, ev.position_ms))
     }
 
@@ -116,11 +117,11 @@ impl Control {
         let mut sub = match self.client.subscribe(wildcard.clone()).await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("nats subscribe failed: {e}; control plane disabled");
+                warn!(err = %e, "nats subscribe failed; control plane disabled");
                 return;
             }
         };
-        println!("nats: subscribed to {wildcard}");
+        info!(subject = %wildcard, "nats subscribed");
         while let Some(msg) = sub.next().await {
             let verb = msg
                 .subject
