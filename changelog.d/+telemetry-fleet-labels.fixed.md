@@ -1,0 +1,1 @@
+OTLP metrics now carry the fleet's `service_namespace` / `service_platform` / `deployment_environment` labels (was `platform` / `deployment_environment_name`, with no namespace). Playout's series now line up with the shared Grafana dashboards and the `by (service_platform, deployment_environment)` alert rules like the rest of the fleet.
