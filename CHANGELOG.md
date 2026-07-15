@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/adanalife/playout/compare/v0.3.0...v0.4.0) (2026-07-15)
+
+
+### Features
+
+* **cdk8s:** stage playout on VAAPI encode with the iGPU claim ([#12](https://github.com/adanalife/playout/issues/12)) ([359299f](https://github.com/adanalife/playout/commit/359299fb03207b5e6ebed52fed54ba75a275a8be))
+* **control-plane:** vlc-server-compatible NATS commands, /vlc/current, and lastplayed resume ([#10](https://github.com/adanalife/playout/issues/10)) ([c99486b](https://github.com/adanalife/playout/commit/c99486b908020c62e762c0d3d528afe72eb9ca87))
+
 ## [0.3.0](https://github.com/adanalife/playout/compare/v0.2.0...v0.3.0) (2026-07-14)
 
 
