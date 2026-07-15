@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use gst::glib;
 use gst::prelude::*;
 use gstreamer as gst;
+use tokio::signal::unix::{SignalKind, signal};
 
 mod http;
 mod nats;
@@ -453,6 +454,19 @@ async fn main() -> Result<()> {
                 _ => {}
             }
         }
+    });
+
+    // k8s stops the pod with SIGTERM: quit the main loop so the pipeline
+    // drops to Null below, which tears down the RTSP publish cleanly.
+    let loop_signal = main_loop.clone();
+    tokio::spawn(async move {
+        let mut term = signal(SignalKind::terminate()).expect("installing SIGTERM handler");
+        let mut int = signal(SignalKind::interrupt()).expect("installing SIGINT handler");
+        tokio::select! {
+            _ = term.recv() => println!("SIGTERM received, shutting down"),
+            _ = int.recv() => println!("SIGINT received, shutting down"),
+        }
+        loop_signal.quit();
     });
 
     let failed = Arc::new(AtomicBool::new(false));
