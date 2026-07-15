@@ -90,8 +90,6 @@ fn gen_corpus(dir: &Path, width: u32, height: u32, fps: u32, seconds: u64) {
                 "!",
                 &format!("video/x-raw,width={width},height={height},framerate={fps}/1"),
                 "!",
-                "timeoverlay",
-                "!",
                 "x264enc",
                 "speed-preset=ultrafast",
                 "tune=zerolatency",
