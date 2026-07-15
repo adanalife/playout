@@ -62,12 +62,19 @@ pub fn init(platform: &str, env: &str) -> Option<SdkMeterProvider> {
             return None;
         }
     };
+    // Fleet label convention (Go pkg/telemetry via OTEL_RESOURCE_ATTRIBUTES):
+    // service.namespace=tripbot, service.platform, deployment.environment. These
+    // become the service_namespace / service_platform / deployment_environment
+    // Prometheus labels the shared dashboards and the
+    // `by (service_platform, deployment_environment)` alert rules key off, so
+    // playout's series line up with the rest of the fleet.
     let resource = Resource::builder()
         .with_service_name("playout")
         .with_attributes([
             KeyValue::new("service.version", crate::VERSION),
-            KeyValue::new("platform", platform.to_string()),
-            KeyValue::new("deployment.environment.name", env.to_string()),
+            KeyValue::new("service.namespace", "tripbot"),
+            KeyValue::new("service.platform", platform.to_string()),
+            KeyValue::new("deployment.environment", env.to_string()),
         ])
         .build();
     let provider = SdkMeterProvider::builder()
