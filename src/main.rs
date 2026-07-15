@@ -70,8 +70,24 @@ fn scan_video_dir(dir: &str) -> Result<Vec<PathBuf>> {
 
 /// The encode branch ends in an RTSP RECORD publish to MediaMTX; consumers
 /// attach to MediaMTX, so this end can restart without them noticing.
+///
+/// ENCODER=passthrough publishes the corpus clips' compressed H.264 without
+/// re-encoding — the airing corpus is transcoded to one uniform spec
+/// (identical params, IDR-leading closed GOPs), which is what makes splicing
+/// compressed streams safe. h264parse re-sends SPS/PPS at every IDR so each
+/// splice and every late joiner resyncs.
 fn make_encode_branch(encoder_name: &str, rtsp_url: &str) -> Result<Vec<gst::Element>> {
     let queue = gst::ElementFactory::make("queue").build()?;
+    let parse = gst::ElementFactory::make("h264parse").build()?;
+    // Re-send SPS/PPS with every IDR so late joiners always sync.
+    parse.set_property("config-interval", -1i32);
+    let sink = gst::ElementFactory::make("rtspclientsink").build()?;
+    sink.set_property("location", rtsp_url);
+
+    if encoder_name == "passthrough" {
+        return Ok(vec![queue, parse, sink]);
+    }
+
     let encoder = gst::ElementFactory::make(encoder_name)
         .build()
         .with_context(|| format!("creating encoder {encoder_name}"))?;
@@ -81,12 +97,6 @@ fn make_encode_branch(encoder_name: &str, rtsp_url: &str) -> Result<Vec<gst::Ele
         encoder.set_property("key-int-max", 120u32);
         encoder.set_property_from_str("speed-preset", "veryfast");
     }
-    let parse = gst::ElementFactory::make("h264parse").build()?;
-    // Re-send SPS/PPS with every IDR so late joiners always sync.
-    parse.set_property("config-interval", -1i32);
-    let sink = gst::ElementFactory::make("rtspclientsink").build()?;
-    sink.set_property("location", rtsp_url);
-
     Ok(vec![queue, encoder, parse, sink])
 }
 
@@ -120,6 +130,9 @@ struct Player {
     files: Vec<PathBuf>,
     /// Live clip bins in play order: `[active, prerolled-next]`.
     clips: Mutex<Vec<Clip>>,
+    /// Clip bins stop at parsed H.264 instead of decoding, and seeks snap to
+    /// keyframes (a compressed stream can't start mid-GOP).
+    passthrough: bool,
 }
 
 type SharedPlayer = Arc<Player>;
@@ -203,6 +216,14 @@ impl Player {
             .property("uri", &uri)
             .build()
             .expect("creating uridecodebin3");
+
+        // Passthrough: stop at parsed H.264 — decodebin3 emits the demuxed,
+        // parsed stream and never builds a decoder. Relies on the corpus
+        // contract (every clip the same uniform spec); a non-H.264 clip fails
+        // to negotiate and errors loudly rather than silently re-encoding.
+        if self.passthrough {
+            decode.set_property("caps", gst::Caps::builder("video/x-h264").build());
+        }
 
         // Video only: audio is composited downstream in OBS, and deselecting
         // here keeps clips with/without audio tracks topology-identical.
@@ -343,10 +364,16 @@ impl Player {
         }
         if offset_ms > 0 {
             let pos = gst::ClockTime::from_mseconds(offset_ms as u64);
-            if decode
-                .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, pos)
-                .is_err()
-            {
+            // Passthrough can't decode-trim to an exact frame: snap to the
+            // keyframe at/before the target instead (≤ one GOP early, so the
+            // playhead the offset seeds runs up to 2s ahead of true position
+            // at the corpus's 2s GOP — fine for resume).
+            let flags = if self.passthrough {
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT | gst::SeekFlags::SNAP_BEFORE
+            } else {
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+            };
+            if decode.seek_simple(flags, pos).is_err() {
                 warn!(offset_ms, "seek refused; starting clip at top");
                 offset_ms = 0;
             }
@@ -544,6 +571,11 @@ async fn run() -> Result<()> {
         "playlist ready"
     );
 
+    let passthrough = encoder_name == "passthrough";
+    if passthrough && output != "rtsp" {
+        bail!("OUTPUT={output} needs decoded video; ENCODER=passthrough supports only rtsp");
+    }
+
     gst::init()?;
     let pipeline = gst::Pipeline::new();
 
@@ -551,30 +583,39 @@ async fn run() -> Result<()> {
     // it rewrites each clip's segment so downstream running time never
     // resets, which is exactly what the encoder needs to stay unbroken.
     let concat = gst::ElementFactory::make("concat").build()?;
-    let q1 = gst::ElementFactory::make("queue").build()?;
-    let convert = gst::ElementFactory::make("videoconvert").build()?;
-    let q2 = gst::ElementFactory::make("queue").build()?;
-    let scale = gst::ElementFactory::make("videoscale").build()?;
-    let q3 = gst::ElementFactory::make("queue").build()?;
-    let rate = gst::ElementFactory::make("videorate").build()?;
-    let q4 = gst::ElementFactory::make("queue").build()?;
-    let caps = gst::ElementFactory::make("capsfilter").build()?;
-    caps.set_property(
-        "caps",
-        gst::Caps::builder("video/x-raw")
-            .field("width", 1920i32)
-            .field("height", 1080i32)
-            .field("framerate", gst::Fraction::new(60, 1))
-            .build(),
-    );
     let tee = gst::ElementFactory::make("tee").build()?;
 
-    pipeline.add_many([
-        &concat, &q1, &convert, &q2, &scale, &q3, &rate, &q4, &caps, &tee,
-    ])?;
-    gst::Element::link_many([
-        &concat, &q1, &convert, &q2, &scale, &q3, &rate, &q4, &caps, &tee,
-    ])?;
+    if passthrough {
+        // Compressed splice: no raw-video processing exists to normalize
+        // clips, so the corpus contract (uniform 1080p60, closed GOPs) is
+        // the spec enforcement — a non-spec clip changes caps mid-stream.
+        let q1 = gst::ElementFactory::make("queue").build()?;
+        pipeline.add_many([&concat, &q1, &tee])?;
+        gst::Element::link_many([&concat, &q1, &tee])?;
+    } else {
+        let q1 = gst::ElementFactory::make("queue").build()?;
+        let convert = gst::ElementFactory::make("videoconvert").build()?;
+        let q2 = gst::ElementFactory::make("queue").build()?;
+        let scale = gst::ElementFactory::make("videoscale").build()?;
+        let q3 = gst::ElementFactory::make("queue").build()?;
+        let rate = gst::ElementFactory::make("videorate").build()?;
+        let q4 = gst::ElementFactory::make("queue").build()?;
+        let caps = gst::ElementFactory::make("capsfilter").build()?;
+        caps.set_property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("width", 1920i32)
+                .field("height", 1080i32)
+                .field("framerate", gst::Fraction::new(60, 1))
+                .build(),
+        );
+        pipeline.add_many([
+            &concat, &q1, &convert, &q2, &scale, &q3, &rate, &q4, &caps, &tee,
+        ])?;
+        gst::Element::link_many([
+            &concat, &q1, &convert, &q2, &scale, &q3, &rate, &q4, &caps, &tee,
+        ])?;
+    }
 
     let mut branches = Vec::new();
     if output == "rtsp" || output == "both" {
@@ -598,6 +639,7 @@ async fn run() -> Result<()> {
         concat,
         files,
         clips: Mutex::new(Vec::new()),
+        passthrough,
     });
 
     // Control plane is best-effort: if NATS is down, playout still loops the

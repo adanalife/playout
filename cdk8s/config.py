@@ -37,7 +37,10 @@ class EnvConfig:
     # node-local copy `vlc-dashcam-local` (same claims vlc-server mounts).
     dashcam_claim: str = "vlc-dashcam"
 
-    encoder: str = "x264enc"  # x264enc | vah264enc (VAAPI — needs gpu)
+    # x264enc | vah264enc (VAAPI — needs gpu) | passthrough (stream-copy;
+    # publishes the corpus's compressed H.264 without re-encoding — needs
+    # every clip on the uniform corpus spec)
+    encoder: str = "x264enc"
     gpu: bool = False  # request gpu.intel.com/i915 (VAAPI encode)
     cpu_request: str = "500m"
     priority_class: str = ""  # prod-stream on prod; "" elsewhere
@@ -68,10 +71,10 @@ ENVS: dict[str, EnvConfig] = {
         namespace="stage-1",
         nats_env="staging",
         image_tag="main",
-        # Mirror prod's encode path and CFS weight so the stage realtime soak
-        # transfers: x264 on CPU, same CPU request. Both envs default to the
-        # CPU encoder — the iGPU carries only the two OBS encoders (a 4th
-        # VAAPI session saturated it and dropped ~90% of output frames).
+        # Stage runs one encode mode ahead of prod as the soak bed:
+        # passthrough (stream-copy, no decode/encode) here first, prod flips
+        # once the realtime soak proves the compressed-splice path.
         cpu_request="2",
+        encoder="passthrough",
     ),
 }

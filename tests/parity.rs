@@ -92,7 +92,9 @@ fn gen_corpus(dir: &Path, width: u32, height: u32, fps: u32, seconds: u64) {
                 "!",
                 "x264enc",
                 "speed-preset=ultrafast",
-                "tune=zerolatency",
+                // 2 B-frames like the airing corpus, so passthrough splices
+                // carry real DTS/PTS reordering, not a zerolatency simplification.
+                "bframes=2",
                 "key-int-max=60",
                 "!",
                 "h264parse",
@@ -177,6 +179,16 @@ fn start_playout(
     mtx_port: u16,
     platform: &str,
 ) -> Playout {
+    start_playout_with(video_dir, nats_port, mtx_port, platform, "x264enc")
+}
+
+fn start_playout_with(
+    video_dir: &Path,
+    nats_port: Option<u16>,
+    mtx_port: u16,
+    platform: &str,
+    encoder: &str,
+) -> Playout {
     let http = free_port();
     let rtsp_url = format!("rtsp://127.0.0.1:{mtx_port}/dashcam");
     let nats_url = nats_port.map_or(String::new(), |p| format!("nats://127.0.0.1:{p}"));
@@ -184,7 +196,7 @@ fn start_playout(
         .env("VIDEO_DIR", video_dir)
         .env("OUTPUT", "rtsp")
         .env("RTSP_URL", &rtsp_url)
-        .env("ENCODER", "x264enc")
+        .env("ENCODER", encoder)
         .env("ENV", "test")
         .env("STREAM_PLATFORM", platform)
         .env("NATS_URL", &nats_url)
@@ -543,6 +555,58 @@ async fn lastplayed_ticker_advances() {
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+/// Passthrough 1: ENCODER=passthrough splices the compressed corpus straight
+/// to MediaMTX — no decode, no encode. Cold boot publishes, and natural
+/// boundaries (the compressed-splice path) advance through every clip.
+#[tokio::test]
+async fn passthrough_publishes_and_splices_boundaries() {
+    serial_or_skip!();
+    let (_nats, nport) = start_nats();
+    let (_mtx, mport) = start_mediamtx();
+    let p = start_playout_with(corpus(), Some(nport), mport, "youtube", "passthrough");
+    wait_ready(p.http);
+
+    wait_for(
+        "MediaMTX path to have a publisher",
+        Duration::from_secs(10),
+        || describe_ok(&p.rtsp_url).then_some(()),
+    );
+    let mut seen = std::collections::HashSet::new();
+    wait_for(
+        "all clips to splice through passthrough boundaries",
+        Duration::from_secs(3 * CLIP_SECONDS * CLIPS.len() as u64),
+        || {
+            let c = current(p.http);
+            if !c.is_empty() {
+                seen.insert(c);
+            }
+            (seen.len() == CLIPS.len()).then_some(())
+        },
+    );
+}
+
+/// Passthrough 2: resume seeks a compressed clip via keyframe snapping.
+/// Resuming a 20s clip at 10s means its successor appears ~10s in; a
+/// silently-demoted seek (from the top) wouldn't hit that boundary until
+/// 20s — so the successor inside 16s proves the KEY_UNIT seek took.
+#[tokio::test]
+async fn passthrough_resume_seeks_to_keyframe() {
+    serial_or_skip!();
+    let (_nats, nport) = start_nats();
+    let (_mtx, mport) = start_mediamtx();
+    seed_lastplayed(nport, "youtube", "clip_b.mp4", 10_000).await;
+    let p = start_playout_with(long_corpus(), Some(nport), mport, "youtube", "passthrough");
+    wait_ready(p.http);
+
+    let cur = wait_current(p.http, "resumed clip", |c| !c.is_empty());
+    assert_eq!(cur, "clip_b.mp4");
+    wait_for(
+        "the successor after the resumed clip's remainder",
+        Duration::from_secs(16),
+        || (current(p.http) == "clip_c.mp4").then_some(()),
+    );
 }
 
 /// Parity test 7: SIGTERM exits zero after a clean teardown (shipped in #20;
