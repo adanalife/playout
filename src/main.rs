@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use gst::glib;
 use gst::prelude::*;
 use gstreamer as gst;
+use tracing::{error, info, warn};
 
 mod http;
 mod nats;
@@ -164,7 +165,7 @@ impl Player {
     /// `offset_ms` seeks the clip before concat reaches it (play.at / resume).
     fn spawn(self: &Arc<Self>, index: usize, offset_ms: i64) {
         let uri = self.uri_at(index);
-        println!("spawning [{index}] {uri} (offset {offset_ms}ms)");
+        info!(index, uri = %uri, offset_ms, "spawning clip");
         let decode = gst::ElementFactory::make("uridecodebin3")
             .property("uri", &uri)
             .build()
@@ -207,7 +208,7 @@ impl Player {
                     .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, pos)
                     .is_err()
                 {
-                    eprintln!("seek to {offset_ms}ms refused; starting clip at top");
+                    warn!(offset_ms, "seek refused; starting clip at top");
                 }
             }
 
@@ -301,14 +302,14 @@ impl Player {
     fn play_file(self: &Arc<Self>, name: &str) {
         match self.find(name) {
             Some(i) => self.play_index(i, 0),
-            None => eprintln!("play.file: {name} not in playlist"),
+            None => warn!(file = name, "play.file: not in playlist"),
         }
     }
 
     fn play_at(self: &Arc<Self>, name: &str, position_ms: i64) {
         match self.find(name) {
             Some(i) => self.play_index(i, position_ms),
-            None => eprintln!("play.at: {name} not in playlist"),
+            None => warn!(file = name, "play.at: not in playlist"),
         }
     }
 
@@ -359,7 +360,12 @@ impl Player {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("playout version {VERSION} (sha: {SHA})");
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+    info!(version = VERSION, sha = SHA, "playout starting");
 
     let video_dir = env_or("VIDEO_DIR", "/opt/data/Dashcam/_all");
     let output = env_or("OUTPUT", "rtsp"); // rtsp | window | both
@@ -370,9 +376,12 @@ async fn main() -> Result<()> {
     let nats_url = env_or("NATS_URL", "nats://localhost:4222");
 
     let files = scan_video_dir(&video_dir)?;
-    println!(
-        "{} clips in {video_dir}, output={output} encoder={encoder_name}",
-        files.len(),
+    info!(
+        clips = files.len(),
+        video_dir = %video_dir,
+        output = %output,
+        encoder = %encoder_name,
+        "playlist ready"
     );
 
     gst::init()?;
@@ -479,11 +488,11 @@ async fn main() -> Result<()> {
     let _watch = bus.add_watch(move |_, msg| {
         match msg.view() {
             gst::MessageView::Error(err) => {
-                eprintln!(
-                    "error from {}: {} ({:?})",
-                    err.src().map(|s| s.path_string()).unwrap_or_default(),
-                    err.error(),
-                    err.debug(),
+                error!(
+                    src = %err.src().map(|s| s.path_string()).unwrap_or_default(),
+                    err = %err.error(),
+                    debug = ?err.debug(),
+                    "pipeline error"
                 );
                 failed_clone.store(true, Ordering::SeqCst);
                 loop_clone.quit();
@@ -491,7 +500,7 @@ async fn main() -> Result<()> {
             gst::MessageView::Eos(_) => {
                 // Clip EOS is dropped at the concat pads; this should be
                 // unreachable for a 24/7 stream.
-                eprintln!("unexpected end of stream");
+                error!("unexpected end of stream");
                 failed_clone.store(true, Ordering::SeqCst);
                 loop_clone.quit();
             }
