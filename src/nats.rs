@@ -1,6 +1,6 @@
 //! Control plane, wire-compatible with tripbot's libvlc vlc-server so nothing
 //! upstream changes at cutover. Commands arrive over **core NATS** (fire-and-
-//! forget, `tripbot.<env>.vlc.<verb>`); the currently-playing clip and playback
+//! forget, `tripbot.<env>.vlc.<verb>.<platform>`); the currently-playing clip and playback
 //! position flow back through the `TRIPBOT_VLC_LASTPLAYED` JetStream last-value
 //! cache, which a restarted instance reads to resume where it left off.
 
@@ -110,23 +110,32 @@ impl Control {
     /// Subscribe to the command subjects and dispatch onto the GLib main loop
     /// (`idle_add_once`) so every pipeline mutation is serialized with the
     /// natural-boundary teardown — no cross-thread races on the clip list.
+    ///
+    /// One explicit subscription per verb, each with this instance's platform
+    /// leaf (`tripbot.<env>.vlc.<verb>.<platform>`) — the shape tripbot
+    /// publishes. The leaf keeps platforms isolated: a Twitch-triggered skip
+    /// must never advance the YouTube stream sharing the env's NATS.
     pub async fn run_commands(self: Arc<Self>, player: SharedPlayer) {
+        const VERBS: [&str; 5] = ["play.random", "play.file", "play.at", "skip", "back"];
         let base = subject(&self.env, ""); // "tripbot.<env>.vlc."
-        let wildcard = format!("{base}>");
-        let mut sub = match self.client.subscribe(wildcard.clone()).await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("nats subscribe failed: {e}; control plane disabled");
-                return;
+        let mut subs = Vec::new();
+        for verb in VERBS {
+            let subj = format!("{base}{verb}.{}", self.platform);
+            match self.client.subscribe(subj.clone()).await {
+                Ok(s) => subs.push(s),
+                Err(e) => {
+                    eprintln!("nats subscribe {subj} failed: {e}; control plane disabled");
+                    return;
+                }
             }
-        };
-        println!("nats: subscribed to {wildcard}");
-        while let Some(msg) = sub.next().await {
-            let verb = msg
-                .subject
-                .strip_prefix(base.as_str())
-                .unwrap_or("")
-                .to_owned();
+            println!("nats: subscribed to {subj}");
+        }
+        let mut merged = futures::stream::select_all(subs);
+        while let Some(msg) = merged.next().await {
+            let Some(verb) = verb_of(msg.subject.as_str(), &base, &self.platform) else {
+                continue;
+            };
+            let verb = verb.to_owned();
             let player = player.clone();
             let payload = msg.payload.clone();
             glib::idle_add_once(move || dispatch(&player, &verb, &payload));
@@ -158,6 +167,15 @@ impl Control {
     }
 }
 
+/// Command verb from a full subject: strips the `tripbot.<env>.vlc.` prefix
+/// and this instance's `.<platform>` leaf. None for foreign subjects.
+fn verb_of<'a>(subject: &'a str, base: &str, platform: &str) -> Option<&'a str> {
+    subject
+        .strip_prefix(base)?
+        .strip_suffix(platform)?
+        .strip_suffix('.')
+}
+
 /// Map a command verb + payload to a Player operation. Runs on the main loop.
 fn dispatch(player: &SharedPlayer, verb: &str, payload: &[u8]) {
     match verb {
@@ -184,7 +202,40 @@ fn dispatch(player: &SharedPlayer, verb: &str, payload: &[u8]) {
                 .unwrap_or(1);
             player.back(n);
         }
-        // lastplayed.<platform> (our own publishes) and anything else: ignore.
+        // Unknown verbs: ignore (only the subscribed command subjects arrive).
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verb_of;
+
+    #[test]
+    fn verb_of_strips_base_and_platform_leaf() {
+        let base = "tripbot.production.vlc.";
+        assert_eq!(
+            verb_of(
+                "tripbot.production.vlc.play.random.youtube",
+                base,
+                "youtube"
+            ),
+            Some("play.random")
+        );
+        assert_eq!(
+            verb_of("tripbot.production.vlc.skip.youtube", base, "youtube"),
+            Some("skip")
+        );
+        // Another platform's leaf must not dispatch here.
+        assert_eq!(
+            verb_of("tripbot.production.vlc.skip.twitch", base, "youtube"),
+            None
+        );
+        // Bare verb without a platform leaf is not a command.
+        assert_eq!(
+            verb_of("tripbot.production.vlc.skip", base, "youtube"),
+            None
+        );
+        assert_eq!(verb_of("other.subject", base, "youtube"), None);
     }
 }
