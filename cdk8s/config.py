@@ -70,6 +70,13 @@ ENVS: dict[str, EnvConfig] = {
         namespace="stage-1",
         nats_env="staging",
         image_tag="main",
-        cpu_request="500m",
+        # Mirror prod's encode path and CFS weight so the stage realtime soak
+        # transfers: VAAPI on the shared iGPU, same CPU request. The i915 claim
+        # also pins the pod to the minipc (the rpi5 advertises no i915) and is
+        # counted by stage-1's co-tenant ResourceQuota, so scaling up too many
+        # stage claimants parks pods Pending instead of degrading prod.
+        cpu_request="2",
+        encoder="vah264enc",
+        gpu=True,
     ),
 }
