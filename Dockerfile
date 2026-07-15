@@ -19,7 +19,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release
+
+# Build identity stamped into the binary (served at /version). release.yml
+# passes real values; the defaults mark unstamped images as dev builds.
+ARG VERSION=dev
+ARG SHA=unknown
+RUN VERSION=$VERSION SHA=$SHA BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+    cargo build --release
 
 # Runtime: trixie matches the build stage's glibc and ships GStreamer 1.26.
 FROM ghcr.io/adanalife/mirror/debian:trixie-slim

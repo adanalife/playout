@@ -14,6 +14,22 @@ use tracing::{error, info, warn};
 mod http;
 mod nats;
 
+/// Build identity served at /version (the fleet-wide version-discovery
+/// contract). Release images stamp VERSION/SHA via Docker build-args and
+/// BUILT_AT at image build; plain cargo builds fall back to the crate version.
+pub const VERSION: &str = match option_env!("VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+pub const SHA: &str = match option_env!("SHA") {
+    Some(s) => s,
+    None => "unknown",
+};
+pub const BUILT_AT: &str = match option_env!("BUILT_AT") {
+    Some(t) => t,
+    None => "unknown",
+};
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -382,6 +398,7 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
+    info!(version = VERSION, sha = SHA, "playout starting");
 
     let video_dir = env_or("VIDEO_DIR", "/opt/data/Dashcam/_all");
     let output = env_or("OUTPUT", "rtsp"); // rtsp | window | both
@@ -393,12 +410,11 @@ async fn main() -> Result<()> {
 
     let files = scan_video_dir(&video_dir)?;
     info!(
-        version = env!("CARGO_PKG_VERSION"),
         clips = files.len(),
         video_dir = %video_dir,
         output = %output,
         encoder = %encoder_name,
-        "playout starting"
+        "playlist ready"
     );
 
     gst::init()?;

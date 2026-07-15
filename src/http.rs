@@ -29,6 +29,20 @@ fn ready_response(state: gst::State) -> (StatusCode, String) {
     }
 }
 
+fn version_json() -> serde_json::Value {
+    serde_json::json!({
+        "tag": crate::VERSION,
+        "sha": crate::SHA,
+        "built_at": crate::BUILT_AT,
+    })
+}
+
+/// Fleet-wide version-discovery contract: build tag, git sha, and RFC3339
+/// build timestamp, as stamped into the binary at build time.
+async fn version() -> impl IntoResponse {
+    axum::Json(version_json())
+}
+
 /// Wire-compatible with vlc-server: plain-text basename of the current clip
 /// (what tripbot's vlc-client reads verbatim), empty string when idle.
 async fn current(State(player): State<SharedPlayer>) -> String {
@@ -46,6 +60,7 @@ pub async fn run(player: SharedPlayer) {
         .route("/health", get(live))
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
+        .route("/version", get(version))
         .route("/vlc/current", get(current))
         .with_state(player);
 
@@ -68,5 +83,13 @@ mod tests {
             let (status, _) = ready_response(state);
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         }
+    }
+
+    #[test]
+    fn version_json_matches_contract() {
+        let v = version_json();
+        assert!(v["tag"].as_str().is_some_and(|t| !t.is_empty()));
+        assert!(v["sha"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(v["built_at"].as_str().is_some_and(|b| !b.is_empty()));
     }
 }
