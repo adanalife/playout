@@ -74,11 +74,43 @@ spec:
             limits:
               memory: 4Gi
               gpu.intel.com/i915: "1"
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 10
       volumes:
         - name: dashcam
           persistentVolumeClaim:
             claimName: vlc-dashcam
             readOnly: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: playout-youtube
+    app.kubernetes.io/instance: playout-youtube
+    app.kubernetes.io/name: playout
+    app.kubernetes.io/part-of: tripbot
+  name: playout-youtube
+  namespace: stage-1
+spec:
+  selector:
+    app: playout-youtube
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
 ---
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
