@@ -1,0 +1,1 @@
+Encode with x264 on CPU instead of VAAPI — a 4th concurrent VAAPI session saturated the iGPU and dropped ~90% of OBS output frames; the minipc has ample CPU headroom. Pods pin to the minipc via nodeSelector (the i915 claim used to do this as a side effect).
