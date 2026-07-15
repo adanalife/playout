@@ -13,6 +13,7 @@ use tracing::{error, info, warn};
 
 mod http;
 mod nats;
+mod telemetry;
 mod watchdog;
 
 /// Build identity served at /version (the fleet-wide version-discovery
@@ -197,6 +198,7 @@ impl Player {
     fn spawn(self: &Arc<Self>, index: usize, offset_ms: i64) {
         let uri = self.uri_at(index);
         info!(index, uri = %uri, offset_ms, "spawning clip");
+        telemetry::CLIP_SPAWNS.add(1, &[]);
         let decode = gst::ElementFactory::make("uridecodebin3")
             .property("uri", &uri)
             .build()
@@ -531,6 +533,8 @@ async fn run() -> Result<()> {
     let platform = env_or("STREAM_PLATFORM", "youtube");
     let nats_url = env_or("NATS_URL", "nats://localhost:4222");
 
+    let meter_provider = telemetry::init(&platform, &nats_env);
+
     let files = scan_video_dir(&video_dir)?;
     info!(
         clips = files.len(),
@@ -613,6 +617,7 @@ async fn run() -> Result<()> {
     player.spawn(first, offset);
     player.spawn((first + 1) % player.files.len(), 0);
 
+    telemetry::spawn_recorder(player.clone());
     tokio::spawn(http::run(player.clone()));
     if let Some(control) = control {
         tokio::spawn(control.clone().run_commands(player.clone()));
@@ -694,6 +699,10 @@ async fn run() -> Result<()> {
     player.mark_active();
     main_loop.run();
     pipeline.set_state(gst::State::Null)?;
+
+    if let Some(provider) = meter_provider {
+        let _ = provider.shutdown();
+    }
 
     if failed.load(Ordering::SeqCst) {
         bail!("pipeline failed");

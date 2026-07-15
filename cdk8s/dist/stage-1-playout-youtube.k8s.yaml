@@ -62,6 +62,9 @@ spec:
             - secretRef:
                 name: sentry-playout
                 optional: true
+            - secretRef:
+                name: grafana-cloud-otlp
+                optional: true
           volumeMounts:
             - name: dashcam
               mountPath: /opt/data/Dashcam/_all
