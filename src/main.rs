@@ -91,7 +91,7 @@ struct Clip {
     index: usize,
     /// Seek offset this clip started at, ms (0 = top of clip).
     offset_ms: i64,
-    /// Output running time when this clip became active; None until promoted.
+    /// Pipeline running time when this clip became active; None until then.
     start_rt: Option<gst::ClockTime>,
 }
 
@@ -372,10 +372,18 @@ impl Player {
         }
     }
 
-    /// Stamp the current active clip (clips[0]) with the output running time it
-    /// went live, so the playhead can report position within the clip.
+    /// Pipeline running time: how long the pipeline has been playing, by the
+    /// clock. Unlike a position query (answered from stream time, which jumps
+    /// with every clip's segment) this is monotonic and wall-paced.
+    fn running_time(&self) -> Option<gst::ClockTime> {
+        let now = self.pipeline.clock()?.time();
+        Some(now.saturating_sub(self.pipeline.base_time()?))
+    }
+
+    /// Stamp the current active clip (clips[0]) with the running time it went
+    /// live, so the playhead can report position within the clip.
     fn mark_active(&self) {
-        let rt = self.pipeline.query_position::<gst::ClockTime>();
+        let rt = self.running_time();
         if let Some(active) = self.clips.lock().unwrap().first_mut() {
             active.start_rt = rt.or(Some(gst::ClockTime::ZERO));
         }
@@ -454,14 +462,16 @@ impl Player {
     }
 
     /// Current clip basename + playback position (ms) for the lastplayed
-    /// last-value cache. Position = start offset + time since the clip went
-    /// active; falls back to the offset alone before the pipeline reports one.
+    /// last-value cache. Position = start offset + running time since the
+    /// clip went active — clock-derived, so it can neither freeze nor race
+    /// ahead the way position queries (stream time) and PTS watermarks
+    /// (decode/queue horizon) both do. Falls back to the offset alone before
+    /// the clip is stamped active.
     fn playhead(&self) -> Option<(String, i64)> {
         let clips = self.clips.lock().unwrap();
         let active = clips.first()?;
         let basename = self.basename_at(active.index);
-        let now = self.pipeline.query_position::<gst::ClockTime>();
-        let position_ms = match (now, active.start_rt) {
+        let position_ms = match (self.running_time(), active.start_rt) {
             (Some(now), Some(start)) => {
                 active.offset_ms + (now.mseconds() as i64 - start.mseconds() as i64).max(0)
             }
