@@ -2,6 +2,12 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.7.0] — 2026-07-15
+
+### Added
+
+- prod-1 renders a `playout-twitch` instance alongside youtube — the second (and last) platform ahead of the vlc-server cutover. Publishes into `mediamtx-twitch`; same VAAPI/iGPU/priority shape as youtube. ([#38](https://github.com/adanalife/playout/pull/38))
+
 ## [v0.6.1] — 2026-07-15
 
 ### Added
