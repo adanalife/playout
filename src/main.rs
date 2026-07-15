@@ -91,7 +91,7 @@ struct Clip {
     index: usize,
     /// Seek offset this clip started at, ms (0 = top of clip).
     offset_ms: i64,
-    /// Output running time when this clip became active; None until promoted.
+    /// Pipeline running time when this clip became active; None until then.
     start_rt: Option<gst::ClockTime>,
 }
 
@@ -229,47 +229,65 @@ impl Player {
         let player = Arc::clone(self);
         let concat_pad = sinkpad.clone();
         decode.connect_pad_added(move |decode, pad| {
-            // Best-effort seek for play.at / resume, BEFORE the pad links into
-            // concat: a FLUSH seek on a linked pad escapes into the shared
-            // chain mid-preroll and wedges it silently (no bus error); on an
-            // unlinked pad the flush stays inside this bin. Tail-guarded and
-            // refusal falls back to top-of-clip, like vlc-server.
-            // ponytail: the mid-stream seek path needs a stage soak — it can't
-            // be exercised without the corpus + a live pipeline.
-            let mut offset_ms = offset_ms;
-            if offset_ms > 0 {
-                let duration_ms = decode
-                    .query_duration::<gst::ClockTime>()
-                    .map(|d| d.mseconds() as i64);
-                if !should_seek_to(offset_ms, duration_ms) {
-                    info!(offset_ms, "seek lands at the clip tail; starting at top");
-                    offset_ms = 0;
-                }
-            }
-            if offset_ms > 0 {
-                let pos = gst::ClockTime::from_mseconds(offset_ms as u64);
-                if decode
-                    .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, pos)
-                    .is_err()
-                {
-                    warn!(offset_ms, "seek refused; starting clip at top");
-                    offset_ms = 0;
-                }
+            // No seek requested: link straight into concat. The clip's buffers
+            // block there until every earlier pad finishes.
+            if offset_ms <= 0 {
+                pad.link(&concat_pad).expect("linking clip into concat");
+                return;
             }
 
+            // Seek path (play.at / resume). Constraints, each one learned the
+            // hard way: a flush seek issued from a streaming thread (this
+            // callback, or a pad probe) deadlocks waiting for the very thread
+            // issuing it; the bin must negotiate while LINKED into concat or
+            // the decoder picks caps against an unlinked pad and errors
+            // not-negotiated; the seek only takes once the bin is streaming
+            // end-to-end (first decoded buffer) — issued earlier it is
+            // accepted and silently swallowed; and nothing pre-seek — the
+            // flush, buffers, or the pre-seek segment, which would rewind
+            // downstream running time and fast-forward the clip — may reach
+            // concat's shared chain. So: link immediately, and hold a probe
+            // that DROPS events (they stay sticky on the pad, and the
+            // post-seek ones re-deliver once the probe is gone — concat
+            // never sees the pre-seek segment) and BLOCKS the first buffer,
+            // which proves the bin fully up; then seek from the main loop
+            // and unblock. Concat's first sight of this pad is the post-seek
+            // segment and buffers to match — indistinguishable from a clip
+            // that begins at the offset.
+            let player = Arc::clone(&player);
+            let decode = decode.clone();
+            let pad_for_seek = pad.clone();
+            let probes = Arc::new(Mutex::new(Vec::new()));
+            let probes_for_seek = Arc::clone(&probes);
+            let scheduled = std::sync::atomic::AtomicBool::new(false);
+            // Flush containment must be its own NON-blocking probe: flush
+            // events bypass blocking probes entirely (callback included), so
+            // the data probe below never even sees them.
+            let flush_probe = pad
+                .add_probe(gst::PadProbeType::EVENT_FLUSH, |_, _| {
+                    gst::PadProbeReturn::Drop
+                })
+                .expect("adding flush-drop probe");
+            let data_probe = pad
+                .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, move |_, info| {
+                    if info.event().is_some() {
+                        return gst::PadProbeReturn::Drop;
+                    }
+                    if scheduled.swap(true, Ordering::SeqCst) {
+                        return gst::PadProbeReturn::Ok;
+                    }
+                    let player = Arc::clone(&player);
+                    let decode = decode.clone();
+                    let pad = pad_for_seek.clone();
+                    let probes = Arc::clone(&probes_for_seek);
+                    glib::idle_add_once(move || {
+                        player.finish_seek(decode, pad, probes, offset_ms);
+                    });
+                    gst::PadProbeReturn::Ok
+                })
+                .expect("blocking clip pad");
+            *probes.lock().unwrap() = vec![data_probe, flush_probe];
             pad.link(&concat_pad).expect("linking clip into concat");
-
-            // Record the offset the clip actually starts at (the guards above
-            // may have demoted a requested offset to top-of-clip).
-            if let Some(clip) = player
-                .clips
-                .lock()
-                .unwrap()
-                .iter_mut()
-                .find(|c| &c.bin == decode)
-            {
-                clip.offset_ms = offset_ms;
-            }
         });
 
         // Push the bookkeeping entry before the bin can start prerolling, so
@@ -283,6 +301,55 @@ impl Player {
         });
         self.pipeline.add(&decode).expect("adding clip bin");
         decode.sync_state_with_parent().expect("starting clip bin");
+    }
+
+    /// Complete a pending clip seek from the main loop, then unblock the
+    /// pad's probe so data flows into concat. Runs once the first decoded
+    /// buffer reaches the pad — the only point where a flush seek on the bin
+    /// reliably takes (any earlier and uridecodebin3 accepts but swallows it).
+    fn finish_seek(
+        self: &Arc<Self>,
+        decode: gst::Element,
+        pad: gst::Pad,
+        probes: Arc<Mutex<Vec<gst::PadProbeId>>>,
+        offset_ms: i64,
+    ) {
+        let mut offset_ms = offset_ms;
+        let duration_ms = decode
+            .query_duration::<gst::ClockTime>()
+            .map(|d| d.mseconds() as i64);
+        // Tail guard and refusal both fall back to top-of-clip, like
+        // vlc-server.
+        if !should_seek_to(offset_ms, duration_ms) {
+            info!(offset_ms, "seek lands at the clip tail; starting at top");
+            offset_ms = 0;
+        }
+        if offset_ms > 0 {
+            let pos = gst::ClockTime::from_mseconds(offset_ms as u64);
+            if decode
+                .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, pos)
+                .is_err()
+            {
+                warn!(offset_ms, "seek refused; starting clip at top");
+                offset_ms = 0;
+            }
+        }
+        for id in probes.lock().unwrap().drain(..) {
+            pad.remove_probe(id);
+        }
+        info!(offset_ms, "clip seeked and unblocked");
+
+        // Record the offset the clip actually starts at (the guards above may
+        // have demoted a requested offset to top-of-clip).
+        if let Some(clip) = self
+            .clips
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|c| c.bin == decode)
+        {
+            clip.offset_ms = offset_ms;
+        }
     }
 
     /// Natural boundary: the finished bin's EOS reached concat, which has
@@ -305,10 +372,18 @@ impl Player {
         }
     }
 
-    /// Stamp the current active clip (clips[0]) with the output running time it
-    /// went live, so the playhead can report position within the clip.
+    /// Pipeline running time: how long the pipeline has been playing, by the
+    /// clock. Unlike a position query (answered from stream time, which jumps
+    /// with every clip's segment) this is monotonic and wall-paced.
+    fn running_time(&self) -> Option<gst::ClockTime> {
+        let now = self.pipeline.clock()?.time();
+        Some(now.saturating_sub(self.pipeline.base_time()?))
+    }
+
+    /// Stamp the current active clip (clips[0]) with the running time it went
+    /// live, so the playhead can report position within the clip.
     fn mark_active(&self) {
-        let rt = self.pipeline.query_position::<gst::ClockTime>();
+        let rt = self.running_time();
         if let Some(active) = self.clips.lock().unwrap().first_mut() {
             active.start_rt = rt.or(Some(gst::ClockTime::ZERO));
         }
@@ -319,11 +394,16 @@ impl Player {
     fn teardown_preroll(&self) {
         let extra: Vec<Clip> = self.clips.lock().unwrap().drain(1..).collect();
         for c in extra {
-            c.bin.set_state(gst::State::Null).ok();
-            self.pipeline.remove(&c.bin).ok();
+            // Release the concat pad BEFORE stopping the bin: the prerolled
+            // bin's streaming thread is parked inside concat waiting for its
+            // turn, holding its pad's stream lock — set_state(Null) needs
+            // that lock to deactivate the pad and deadlocks unless the
+            // release wakes the waiter first.
             if let Some(pad) = c.pad {
                 self.concat.release_request_pad(&pad);
             }
+            c.bin.set_state(gst::State::Null).ok();
+            self.pipeline.remove(&c.bin).ok();
         }
     }
 
@@ -382,14 +462,16 @@ impl Player {
     }
 
     /// Current clip basename + playback position (ms) for the lastplayed
-    /// last-value cache. Position = start offset + time since the clip went
-    /// active; falls back to the offset alone before the pipeline reports one.
+    /// last-value cache. Position = start offset + running time since the
+    /// clip went active — clock-derived, so it can neither freeze nor race
+    /// ahead the way position queries (stream time) and PTS watermarks
+    /// (decode/queue horizon) both do. Falls back to the offset alone before
+    /// the clip is stamped active.
     fn playhead(&self) -> Option<(String, i64)> {
         let clips = self.clips.lock().unwrap();
         let active = clips.first()?;
         let basename = self.basename_at(active.index);
-        let now = self.pipeline.query_position::<gst::ClockTime>();
-        let position_ms = match (now, active.start_rt) {
+        let position_ms = match (self.running_time(), active.start_rt) {
             (Some(now), Some(start)) => {
                 active.offset_ms + (now.mseconds() as i64 - start.mseconds() as i64).max(0)
             }
