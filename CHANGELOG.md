@@ -2,6 +2,19 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.6.0] — 2026-07-15
+
+### Added
+
+- Sentry error reporting: `tracing` ERROR events become Sentry events (WARN/INFO attach as breadcrumbs), tagged with the release and the `ENV` environment. Enabled by the `SENTRY_DSN` env var, delivered via a per-namespace ESO secret; local runs without it are unaffected. ([#29](https://github.com/adanalife/playout/pull/29))
+- cdk8s: a `playout-<platform>` Service exposes the HTTP control surface on :8080 (the name tripbot's `VLC_SERVER_HOST` dials after cutover), and the Deployment gains liveness/readiness probes against `/health/live` and `/health/ready`. ([#30](https://github.com/adanalife/playout/pull/30))
+- RTSP publish watchdog (vlc-server parity): DESCRIBE-probes the MediaMTX path every 30s and exits non-zero after 3 consecutive failures, so k8s restarts the pod and playback resumes from JetStream. Catches the dead-publish-while-PLAYING failure mode that readiness probes can't see. ([#32](https://github.com/adanalife/playout/pull/32))
+- OTLP metrics push to Grafana Cloud (the Rust counterpart of the Go fleet's `pkg/telemetry`): playhead position and pipeline running time sampled every 5s, plus clip-spawn and per-verb command counters, tagged with service version, platform, and environment. Gates off when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset; the deployment reads the shared `grafana-cloud-otlp` secret. ([#33](https://github.com/adanalife/playout/pull/33))
+
+### Changed
+
+- Startup matches vlc-server: a cold boot with no resume state plays a random clip instead of always the first, and the corpus scan walks subdirectories recursively. An empty corpus still exits loudly (deliberate divergence — a crash-looping pod beats a silent dead stream). ([#31](https://github.com/adanalife/playout/pull/31))
+
 ## [v0.5.2] — 2026-07-15
 
 ### Fixed
