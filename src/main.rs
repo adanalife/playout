@@ -319,11 +319,16 @@ impl Player {
     fn teardown_preroll(&self) {
         let extra: Vec<Clip> = self.clips.lock().unwrap().drain(1..).collect();
         for c in extra {
-            c.bin.set_state(gst::State::Null).ok();
-            self.pipeline.remove(&c.bin).ok();
+            // Release the concat pad BEFORE stopping the bin: the prerolled
+            // bin's streaming thread is parked inside concat waiting for its
+            // turn, holding its pad's stream lock — set_state(Null) needs
+            // that lock to deactivate the pad and deadlocks unless the
+            // release wakes the waiter first.
             if let Some(pad) = c.pad {
                 self.concat.release_request_pad(&pad);
             }
+            c.bin.set_state(gst::State::Null).ok();
+            self.pipeline.remove(&c.bin).ok();
         }
     }
 
