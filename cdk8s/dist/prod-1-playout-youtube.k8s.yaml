@@ -59,6 +59,9 @@ spec:
           envFrom:
             - configMapRef:
                 name: playout-youtube-config
+            - secretRef:
+                name: sentry-playout
+                optional: true
           volumeMounts:
             - name: dashcam
               mountPath: /opt/data/Dashcam/_all
@@ -77,3 +80,22 @@ spec:
             claimName: vlc-dashcam-local
             readOnly: true
       priorityClassName: prod-stream
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  labels:
+    app.kubernetes.io/part-of: tripbot
+  name: sentry-playout
+  namespace: prod-1
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-parameterstore
+    kind: SecretStore
+  target:
+    name: sentry-playout
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: /k8s/sentry-playout

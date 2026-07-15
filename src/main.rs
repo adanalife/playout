@@ -481,12 +481,30 @@ impl Player {
     }
 }
 
+fn main() -> Result<()> {
+    // Reads SENTRY_DSN from the environment; unset (local runs) leaves the
+    // client disabled. ENV (development/staging/production) doubles as the
+    // Sentry environment tag, matching the Go fleet. Init precedes the tokio
+    // runtime so the transport thread outlives every worker.
+    let _sentry = sentry::init(sentry::ClientOptions {
+        release: Some(format!("playout@{VERSION}").into()),
+        environment: std::env::var("ENV").ok().map(Into::into),
+        ..Default::default()
+    });
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+async fn run() -> Result<()> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
+        .with(tracing_subscriber::fmt::layer())
+        // ERROR events become Sentry events; WARN/INFO attach as breadcrumbs.
+        .with(sentry_tracing::layer())
         .init();
     info!(version = VERSION, sha = SHA, "playout starting");
 
