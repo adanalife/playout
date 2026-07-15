@@ -2,6 +2,16 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.6.1] — 2026-07-15
+
+### Added
+
+- CI behavioral-parity harness (`tests/parity.rs`): every PR boots the real binary against a real MediaMTX + NATS JetStream with synthetic clips and asserts over HTTP/NATS/RTSP — cold-boot publish and byte-exact `/vlc/current`, resume from a pre-seeded lastplayed (the 0.4.0 wedge regression test) with tail-guard and missing-file variants, every command verb plus other-platform isolation and edge payloads, boundary wrap, lastplayed ticker advance, and clean SIGTERM exit. A corrupt-clip resilience test ships ignored, documenting a known gap. ([#34](https://github.com/adanalife/playout/pull/34))
+
+### Fixed
+
+- OTLP metrics now carry the fleet's `service_namespace` / `service_platform` / `deployment_environment` labels (was `platform` / `deployment_environment_name`, with no namespace). Playout's series now line up with the shared Grafana dashboards and the `by (service_platform, deployment_environment)` alert rules like the rest of the fleet. ([#36](https://github.com/adanalife/playout/pull/36))
+
 ## [v0.6.0] — 2026-07-15
 
 ### Added
