@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/adanalife/playout/compare/v0.5.0...v0.5.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* request concat pads in spawn order, not preroll order ([#22](https://github.com/adanalife/playout/issues/22)) ([d2c4ceb](https://github.com/adanalife/playout/commit/d2c4cebaae6efcb8ecb29fbc35e49dd2766e6e87))
+
 ## [0.5.0](https://github.com/adanalife/playout/compare/v0.4.0...v0.5.0) (2026-07-15)
 
 
