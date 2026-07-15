@@ -27,7 +27,7 @@ jobs:
   fragment:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-changelog') && github.head_ref != 'release-please--branches--main' }}
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-changelog') && !startsWith(github.head_ref, 'release-please--') }}
     steps:
       - uses: actions/checkout@v7
         with:

@@ -34,7 +34,7 @@ jobs:
     # and release-please's own branch (it carries no fragments to number).
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.head_ref != 'release-please--branches--main'
+      !startsWith(github.head_ref, 'release-please--')
     steps:
       - name: Mint automation app token
         id: app-token
