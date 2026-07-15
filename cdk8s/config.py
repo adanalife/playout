@@ -30,8 +30,7 @@ class EnvConfig:
     # matching what vlc-server and cmd/tripbot use — NOT the k8s env name.
     nats_env: str = "development"
 
-    # Platform instances to render. The A/B phase runs youtube only (the
-    # unwatched stream); twitch joins at cutover.
+    # Platform instances to render.
     platforms: tuple[str, ...] = ("youtube",)
 
     # Which PVC holds the dashcam corpus: the NFS-backed `vlc-dashcam` or the
@@ -58,6 +57,7 @@ ENVS: dict[str, EnvConfig] = {
         name="prod-1",
         namespace="prod-1",
         nats_env="production",
+        platforms=("youtube", "twitch"),
         image_tag="latest",  # overridden by the versions.yaml pin
         dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
         cpu_request="2",
