@@ -2,6 +2,12 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.5.2] — 2026-07-15
+
+### Fixed
+
+- Resume and `play.at` seeks now actually take effect: the seek is issued off the streaming thread once the clip is fully up, its flush is contained inside the clip bin, and teardown of a prerolled clip no longer can deadlock the control plane. The lastplayed playhead is now clock-derived so cached positions neither freeze nor race ahead. ([#25](https://github.com/adanalife/playout/pull/25))
+
 ## [v9.9.9] — 2026-07-15
 
 ### Misc
