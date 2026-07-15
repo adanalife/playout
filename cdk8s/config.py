@@ -65,15 +65,17 @@ ENVS: dict[str, EnvConfig] = {
         dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
         cpu_request="2",
         priority_class="prod-stream",
+        # Stream-copy the uniform corpus straight to MediaMTX. x264 is
+        # disqualified here: it can't hold 1080p60 realtime on this box
+        # (2026-07-14 youtube A/B, 2026-07-15 twitch runaway).
+        encoder="passthrough",
     ),
     "stage-1": EnvConfig(
         name="stage-1",
         namespace="stage-1",
         nats_env="staging",
         image_tag="main",
-        # Stage runs one encode mode ahead of prod as the soak bed:
-        # passthrough (stream-copy, no decode/encode) here first, prod flips
-        # once the realtime soak proves the compressed-splice path.
+        # Same encode mode as prod so the stage soak transfers.
         cpu_request="2",
         encoder="passthrough",
     ),
