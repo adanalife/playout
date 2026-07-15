@@ -179,6 +179,13 @@ fn verb_of<'a>(subject: &'a str, base: &str, platform: &str) -> Option<&'a str> 
 
 /// Map a command verb + payload to a Player operation. Runs on the main loop.
 fn dispatch(player: &SharedPlayer, verb: &str, payload: &[u8]) {
+    if matches!(
+        verb,
+        "play.random" | "play.file" | "play.at" | "skip" | "back"
+    ) {
+        crate::telemetry::COMMANDS
+            .add(1, &[opentelemetry::KeyValue::new("verb", verb.to_string())]);
+    }
     match verb {
         "play.random" => player.play_random(),
         "play.file" => {

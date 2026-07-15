@@ -13,6 +13,9 @@ async-nats = "0.49.1"
 axum = "0.8.9"
 futures = "0.3.32"
 gstreamer = "0.25"
+opentelemetry = "0.32.0"
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["metrics", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
+opentelemetry_sdk = { version = "0.32.1", features = ["metrics"] }
 # rustls transport instead of the native-tls default: no libssl in the
 # runtime image (root certs come from its ca-certificates package).
 sentry = { version = "0.48.5", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }

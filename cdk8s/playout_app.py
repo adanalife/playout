@@ -159,6 +159,10 @@ class PlayoutInstance(Construct):
                 # Sentry DSN. Optional so the pod starts before the
                 # ExternalSecret syncs; the binary no-ops without SENTRY_DSN.
                 {"secretRef": {"name": SENTRY_SECRET, "optional": True}},
+                # Grafana Cloud OTLP endpoint + auth (OTEL_EXPORTER_OTLP_*),
+                # the same ESO secret tripbot materializes in this namespace.
+                # Optional for the same reason; telemetry gates off without it.
+                {"secretRef": {"name": "grafana-cloud-otlp", "optional": True}},
             ],
             "volumeMounts": [
                 {

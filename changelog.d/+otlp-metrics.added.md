@@ -1,0 +1,1 @@
+OTLP metrics push to Grafana Cloud (the Rust counterpart of the Go fleet's `pkg/telemetry`): playhead position and pipeline running time sampled every 5s, plus clip-spawn and per-verb command counters, tagged with service version, platform, and environment. Gates off when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset; the deployment reads the shared `grafana-cloud-otlp` secret.
