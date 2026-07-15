@@ -190,6 +190,10 @@ class PlayoutInstance(Construct):
 
         pod_spec: dict = {
             "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+            # Pin to the minipc: the rpi5's four cores are fully spent on OBS
+            # compositing, and prod's node-local corpus PVC lives there anyway.
+            # (The i915 claim used to enforce this as a side effect.)
+            "nodeSelector": {"kubernetes.io/arch": "amd64"},
             "containers": [container],
             "volumes": [
                 {

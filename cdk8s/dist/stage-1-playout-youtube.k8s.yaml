@@ -11,7 +11,7 @@ metadata:
 data:
   VIDEO_DIR: /opt/data/Dashcam/_all
   OUTPUT: rtsp
-  ENCODER: vah264enc
+  ENCODER: x264enc
   RTSP_URL: rtsp://mediamtx-youtube:8554/dashcam
   NATS_URL: nats://nats.stage-1-platform.svc.cluster.local:4222
   ENV: staging
@@ -42,11 +42,13 @@ spec:
         app.kubernetes.io/instance: playout-youtube
         app.kubernetes.io/part-of: tripbot
       annotations:
-        adanalife.dev/config-hash: 0377428fd1
+        adanalife.dev/config-hash: f6961f09cc
     spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+      nodeSelector:
+        kubernetes.io/arch: amd64
       containers:
         - name: playout
           image: ghcr.io/adanalife/playout:main
@@ -73,10 +75,8 @@ spec:
             requests:
               cpu: "2"
               memory: 512Mi
-              gpu.intel.com/i915: "1"
             limits:
               memory: 4Gi
-              gpu.intel.com/i915: "1"
           ports:
             - name: http
               containerPort: 8080
