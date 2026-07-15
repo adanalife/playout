@@ -11,7 +11,7 @@ metadata:
 data:
   VIDEO_DIR: /opt/data/Dashcam/_all
   OUTPUT: rtsp
-  ENCODER: x264enc
+  ENCODER: passthrough
   RTSP_URL: rtsp://mediamtx-twitch:8554/dashcam
   NATS_URL: nats://nats.prod-1-platform.svc.cluster.local:4222
   ENV: production
@@ -42,7 +42,7 @@ spec:
         app.kubernetes.io/instance: playout-twitch
         app.kubernetes.io/part-of: tripbot
       annotations:
-        adanalife.dev/config-hash: 5a8f98ad15
+        adanalife.dev/config-hash: 2d7721e7ab
     spec:
       securityContext:
         seccompProfile:
