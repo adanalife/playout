@@ -195,7 +195,39 @@ impl Player {
             Some((selected as i32).to_value())
         });
 
+        // Request the concat pad here, not in pad-added: concat plays its
+        // sink pads in request order, while pad-added fires in
+        // preroll-completion order. Letting preroll order pick the pad order
+        // plays clips out of sequence — and on resume the seeked clip
+        // prerolls last, so its pad lands behind the "next" clip and the
+        // pipeline EOSes at the first boundary.
+        let sinkpad = self
+            .concat
+            .request_pad_simple("sink_%u")
+            .expect("requesting concat pad");
+
+        // EOS on this pad = clip finished and concat has moved on: tear
+        // down the finished bin off the streaming thread and top up.
         let player = Arc::clone(self);
+        let decode_for_eos = decode.clone();
+        sinkpad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+            let Some(ev) = info.event() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            if ev.type_() != gst::EventType::Eos {
+                return gst::PadProbeReturn::Ok;
+            }
+            let player = Arc::clone(&player);
+            let decode = decode_for_eos.clone();
+            let pad = pad.clone();
+            glib::idle_add_once(move || player.on_clip_eos(&decode, &pad));
+            // Drop the EOS: concat handles pad switching itself, and the
+            // pipeline-level EOS must never fire (24/7 stream).
+            gst::PadProbeReturn::Drop
+        });
+
+        let player = Arc::clone(self);
+        let concat_pad = sinkpad.clone();
         decode.connect_pad_added(move |decode, pad| {
             // Best-effort seek for play.at / resume, BEFORE the pad links into
             // concat: a FLUSH seek on a linked pad escapes into the shared
@@ -225,15 +257,10 @@ impl Player {
                 }
             }
 
-            let sinkpad = player
-                .concat
-                .request_pad_simple("sink_%u")
-                .expect("requesting concat pad");
-            pad.link(&sinkpad).expect("linking clip into concat");
+            pad.link(&concat_pad).expect("linking clip into concat");
 
-            // Record the pad so a command can release it when redirecting, and
-            // the offset the clip actually starts at (the guards above may
-            // have demoted a requested offset to top-of-clip).
+            // Record the offset the clip actually starts at (the guards above
+            // may have demoted a requested offset to top-of-clip).
             if let Some(clip) = player
                 .clips
                 .lock()
@@ -241,40 +268,21 @@ impl Player {
                 .iter_mut()
                 .find(|c| &c.bin == decode)
             {
-                clip.pad = Some(sinkpad.clone());
                 clip.offset_ms = offset_ms;
             }
-
-            // EOS on this pad = clip finished and concat has moved on: tear
-            // down the finished bin off the streaming thread and top up.
-            let player = Arc::clone(&player);
-            let decode = decode.clone();
-            sinkpad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
-                let Some(ev) = info.event() else {
-                    return gst::PadProbeReturn::Ok;
-                };
-                if ev.type_() != gst::EventType::Eos {
-                    return gst::PadProbeReturn::Ok;
-                }
-                let player = Arc::clone(&player);
-                let decode = decode.clone();
-                let pad = pad.clone();
-                glib::idle_add_once(move || player.on_clip_eos(&decode, &pad));
-                // Drop the EOS: concat handles pad switching itself, and the
-                // pipeline-level EOS must never fire (24/7 stream).
-                gst::PadProbeReturn::Drop
-            });
         });
 
-        self.pipeline.add(&decode).expect("adding clip bin");
-        decode.sync_state_with_parent().expect("starting clip bin");
+        // Push the bookkeeping entry before the bin can start prerolling, so
+        // pad-added always finds it.
         self.clips.lock().unwrap().push(Clip {
-            bin: decode,
-            pad: None,
+            bin: decode.clone(),
+            pad: Some(sinkpad),
             index,
             offset_ms,
             start_rt: None,
         });
+        self.pipeline.add(&decode).expect("adding clip bin");
+        decode.sync_state_with_parent().expect("starting clip bin");
     }
 
     /// Natural boundary: the finished bin's EOS reached concat, which has
