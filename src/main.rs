@@ -34,17 +34,31 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// Recursively collect the `.mp4` files (case-insensitive) under `dir`,
+/// sorted by full path. vlc-server walks recursively too — today's corpus is
+/// flat, but the scan must not silently miss a subdir the day one appears.
+/// An empty corpus is a deployment fault: bail loudly and let the pod
+/// crash-loop rather than publish a dead stream.
 fn scan_video_dir(dir: &str) -> Result<Vec<PathBuf>> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .with_context(|| format!("reading VIDEO_DIR {dir}"))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
+    let mut files = Vec::new();
+    let mut dirs = vec![PathBuf::from(dir)];
+    while let Some(d) = dirs.pop() {
+        for entry in
+            std::fs::read_dir(&d).with_context(|| format!("reading VIDEO_DIR {}", d.display()))?
+        {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path
+                .extension()
                 .and_then(|e| e.to_str())
                 .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
-        })
-        .collect();
+            {
+                files.push(path);
+            }
+        }
+    }
     files.sort();
     if files.is_empty() {
         bail!("no .mp4 files found in {dir}");
@@ -592,7 +606,9 @@ async fn run() -> Result<()> {
     };
 
     // Active clip + prerolled next; every EOS tops the pair back up.
-    let (first, offset) = resume.unwrap_or((0, 0));
+    // Cold boot (no resume state) starts on a random clip, like vlc-server —
+    // otherwise every clean deploy replays the same first clip on stream.
+    let (first, offset) = resume.unwrap_or_else(|| (player.random_index(), 0));
     player.spawn(first, offset);
     player.spawn((first + 1) % player.files.len(), 0);
 
@@ -676,7 +692,27 @@ async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{back_index, should_seek_to, skip_index};
+    use super::{back_index, scan_video_dir, should_seek_to, skip_index};
+
+    #[test]
+    fn scan_walks_subdirs_case_insensitively() {
+        let root = std::env::temp_dir().join(format!("playout-scan-test-{}", std::process::id()));
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join("a.MP4"), b"").unwrap();
+        std::fs::write(sub.join("b.mp4"), b"").unwrap();
+        std::fs::write(sub.join("notes.txt"), b"").unwrap();
+
+        let files = scan_video_dir(root.to_str().unwrap()).unwrap();
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["a.MP4", "b.mp4"]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(scan_video_dir(root.to_str().unwrap()).is_err());
+    }
 
     #[test]
     fn skip_wraps_and_floors_to_one() {
