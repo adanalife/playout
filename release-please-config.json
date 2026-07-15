@@ -4,6 +4,7 @@
   "packages": {
     ".": {
       "release-type": "rust",
+      "skip-changelog": true,
       "extra-files": [
         "cdk8s/versions.yaml",
         "cdk8s/dist/prod-1-playout-youtube.k8s.yaml"

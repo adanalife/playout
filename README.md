@@ -53,3 +53,21 @@ task play               # terminal 3: watch it
 
 `task probe` streams packet timestamps off the RTSP feed — the check for
 boundary EOFs and PTS discontinuities.
+
+## Releasing
+
+Trunk-based `main` + [release-please](https://github.com/googleapis/release-please), with towncrier changelog fragments:
+
+1. Feature PRs target `main` (squash-merge, conventional title); each adds a
+   fragment (`task changelog:add TYPE=<type>` — no PR number needed, CI fills it
+   in on push) or carries the `skip-changelog` label.
+2. `dev-image.yml` floats `ghcr.io/adanalife/playout:main` on every main push —
+   what stage deploys.
+3. `release-please.yml` maintains a standing release PR that bumps the version,
+   the prod pin (`cdk8s/versions.yaml`), and the committed dist from the
+   conventional commits, and collates the `changelog.d/` fragments into
+   `CHANGELOG.md` on the PR branch.
+4. **To ship: squash-merge the release PR.** That tags `vX.Y.Z`, creates the
+   GitHub Release, and dispatches `release.yml` to build the image to GHCR. No
+   manual version/changelog steps — the version follows from the commit types
+   (`feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE` → major).

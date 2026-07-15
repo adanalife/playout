@@ -1,5 +1,13 @@
 # Changelog
 
+<!-- towncrier release notes start -->
+
+## [v9.9.9] — 2026-07-15
+
+### Misc
+
+- Adopt towncrier changelog fragments. ([#99](https://github.com/adanalife/playout/pull/99))
+
 ## [0.5.1](https://github.com/adanalife/playout/compare/v0.5.0...v0.5.1) (2026-07-15)
 
 
