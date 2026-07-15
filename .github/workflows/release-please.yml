@@ -54,7 +54,7 @@ jobs:
         if: ${{ steps.release.outputs.pr && !steps.release.outputs.release_created }}
         uses: actions/checkout@v7
         with:
-          ref: release-please--branches--main
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
@@ -83,7 +83,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit --allow-empty -m "chore: build changelog for $VERSION"
-          git push origin HEAD:release-please--branches--main
+          git push origin HEAD:${{ fromJSON(steps.release.outputs.pr).headBranchName }}
 
       - name: Dispatch release workflow at the new tag
         if: ${{ steps.release.outputs.release_created }}
