@@ -13,6 +13,7 @@ use tracing::{error, info, warn};
 
 mod http;
 mod nats;
+mod watchdog;
 
 /// Build identity served at /version (the fleet-wide version-discovery
 /// contract). Release images stamp VERSION/SHA via Docker build-args and
@@ -678,6 +679,16 @@ async fn run() -> Result<()> {
         }
         glib::ControlFlow::Continue
     })?;
+
+    // Watchdog only when we actually publish (not the window-only local mode).
+    if output != "window" {
+        let wd_failed = failed.clone();
+        let wd_loop = main_loop.clone();
+        tokio::spawn(watchdog::run(rtsp_url.clone(), move || {
+            wd_failed.store(true, Ordering::SeqCst);
+            wd_loop.quit();
+        }));
+    }
 
     pipeline.set_state(gst::State::Playing)?;
     player.mark_active();
