@@ -1,6 +1,6 @@
 use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -165,6 +165,13 @@ fn should_seek_to(offset_ms: i64, duration_ms: Option<i64>) -> bool {
         Some(d) if d > 0 => offset_ms < d - SEEK_TAIL_GUARD_MS,
         _ => true,
     }
+}
+
+/// One output frame's PTS is a "gap" when it lands more than `threshold_ns`
+/// after the previous frame — a visible stall or drop. `prev_ns == u64::MAX`
+/// is the "no previous frame yet" sentinel (first buffer never counts).
+fn is_frame_gap(prev_ns: u64, pts_ns: u64, threshold_ns: u64) -> bool {
+    prev_ns != u64::MAX && pts_ns > prev_ns.saturating_add(threshold_ns)
 }
 
 impl Player {
@@ -654,6 +661,33 @@ async fn run() -> Result<()> {
     let concat = gst::ElementFactory::make("concat").build()?;
     let tee = gst::ElementFactory::make("tee").build()?;
 
+    // Output-frame telemetry, tapped once at the tee's sink pad — upstream of
+    // the branch split, so it counts frames regardless of how many outputs are
+    // wired. Every buffer here is one frame: raw video in the decoded path,
+    // one parsed H.264 access unit in passthrough. rate(playout_output_frames_total)
+    // is the true output fps. A PTS jump past the gap threshold is a frame the
+    // viewer saw stall or drop — concat keeps running time continuous across
+    // splices, so a gap means a real hitch, not a boundary.
+    // ponytail: thresholds hard-coded for the corpus's fixed 1080p60; derive
+    // from the caps framerate if playout ever runs a non-60 stream.
+    const FRAME_INTERVAL_NS: u64 = 1_000_000_000 / 60;
+    const GAP_THRESHOLD_NS: u64 = FRAME_INTERVAL_NS * 3 / 2;
+    let last_pts = AtomicU64::new(u64::MAX);
+    tee.static_pad("sink")
+        .expect("tee always has a static sink pad")
+        .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            if let Some(gst::PadProbeData::Buffer(ref buf)) = info.data {
+                telemetry::OUTPUT_FRAMES.add(1, &[]);
+                if let Some(pts) = buf.pts() {
+                    let prev = last_pts.swap(pts.nseconds(), Ordering::Relaxed);
+                    if is_frame_gap(prev, pts.nseconds(), GAP_THRESHOLD_NS) {
+                        telemetry::OUTPUT_FRAME_GAPS.add(1, &[]);
+                    }
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+
     if passthrough {
         // Compressed splice: no raw-video processing exists to normalize
         // clips, so the corpus contract (uniform 1080p60, closed GOPs) is
@@ -835,7 +869,18 @@ async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{back_index, scan_video_dir, should_seek_to, skip_index};
+    use super::{back_index, is_frame_gap, scan_video_dir, should_seek_to, skip_index};
+
+    #[test]
+    fn frame_gap_detection() {
+        let interval = 1_000_000_000u64 / 60; // 16.67ms
+        let threshold = interval * 3 / 2;
+        assert!(!is_frame_gap(u64::MAX, 12345, threshold)); // first buffer
+        assert!(!is_frame_gap(0, interval, threshold)); // steady 60fps step
+        assert!(!is_frame_gap(0, interval, threshold)); // exactly one interval
+        assert!(is_frame_gap(0, interval * 2, threshold)); // a frame missing
+        assert!(!is_frame_gap(interval * 5, interval * 4, threshold)); // non-increasing PTS
+    }
 
     #[test]
     fn scan_walks_subdirs_case_insensitively() {
