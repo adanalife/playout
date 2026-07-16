@@ -1,0 +1,1 @@
+A corrupt or unplayable clip no longer kills the pipeline (and, via resume-from-lastplayed, crash-loops on it): the failed clip bin is torn down and playback skips to the next clip, like vlc-server rolling past bad files. Encoder/sink errors stay fatal, and an all-bad playlist still gives up instead of spinning.

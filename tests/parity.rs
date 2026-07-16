@@ -121,6 +121,22 @@ fn corpus() -> &'static Path {
     })
 }
 
+/// The main corpus plus a garbage `.mp4` (sorted mid-playlist, between b and
+/// c) for the corrupt-clip recovery tests.
+fn corrupt_corpus() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("playout-parity-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in CLIPS {
+            std::fs::copy(corpus().join(name), dir.join(name)).unwrap();
+        }
+        std::fs::write(dir.join("clip_bad.mp4"), b"this is not an mp4").unwrap();
+        dir
+    })
+}
+
 /// Long-clip corpus (20s, small frames for cheap encode) for tests that
 /// assert "current did NOT change" — with 2s clips a natural boundary lands
 /// mid-assertion and reads as a leaked command.
@@ -484,24 +500,15 @@ async fn boundaries_advance_and_wrap() {
     );
 }
 
-/// Parity test 5 (known gap): a corrupt clip mid-corpus must not take the
-/// pipeline down. Today a decode error is fatal — pipeline error handling
-/// treats every bus error as process-fatal — so this documents the target
-/// behavior until per-clip error recovery lands.
+/// Parity test 5: a corrupt clip mid-corpus must not take the pipeline down —
+/// the failed clip bin is torn down and playback rolls past it, like
+/// vlc-server does with bad files.
 #[tokio::test]
-#[ignore = "known gap: corrupt clip currently kills the pipeline (vlc-server rolls past it)"]
 async fn corrupt_clip_is_skipped() {
     serial_or_skip!();
-    let dir = std::env::temp_dir().join(format!("playout-parity-corrupt-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    for name in CLIPS {
-        std::fs::copy(corpus().join(name), dir.join(name)).unwrap();
-    }
-    std::fs::write(dir.join("clip_bad.mp4"), b"this is not an mp4").unwrap();
-
     let (_nats, nport) = start_nats();
     let (_mtx, mport) = start_mediamtx();
-    let mut p = start_playout(&dir, Some(nport), mport, "youtube");
+    let mut p = start_playout(corrupt_corpus(), Some(nport), mport, "youtube");
     wait_ready(p.http);
 
     let mut seen = std::collections::HashSet::new();
@@ -520,6 +527,33 @@ async fn corrupt_clip_is_skipped() {
             (seen.len() == CLIPS.len()).then_some(())
         },
     );
+}
+
+/// Resume pointing at a corrupt clip must not become a boot crash-loop
+/// (restart → resume same clip → crash again): boot absorbs the failure and
+/// playback lands on a good clip.
+#[tokio::test]
+async fn resume_into_corrupt_clip_recovers() {
+    serial_or_skip!();
+    let (_nats, nport) = start_nats();
+    let (_mtx, mport) = start_mediamtx();
+    seed_lastplayed(nport, "youtube", "clip_bad.mp4", 500).await;
+    let mut p = start_playout(corrupt_corpus(), Some(nport), mport, "youtube");
+    wait_ready(p.http);
+
+    let cur = wait_for(
+        "playback to land past the corrupt resume clip",
+        Duration::from_secs(30),
+        || {
+            assert!(
+                p.proc.0.try_wait().unwrap().is_none(),
+                "playout exited resuming into the corrupt clip"
+            );
+            let c = current(p.http);
+            (!c.is_empty() && c != "clip_bad.mp4").then_some(c)
+        },
+    );
+    assert!(CLIPS.contains(&cur.as_str()), "landed on {cur:?}");
 }
 
 /// Parity test 6: the lastplayed ticker keeps the JetStream last-value cache

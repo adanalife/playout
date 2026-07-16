@@ -29,6 +29,13 @@ pub static CLIP_SPAWNS: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
+pub static CLIP_ERRORS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("playout")
+        .u64_counter("playout_clip_errors_total")
+        .with_description("Clip bins torn down after a decode/negotiation error")
+        .build()
+});
+
 pub static COMMANDS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter("playout")
         .u64_counter("playout_commands_total")
