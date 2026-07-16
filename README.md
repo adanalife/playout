@@ -54,6 +54,11 @@ task play               # terminal 3: watch it
 `task probe` streams packet timestamps off the RTSP feed — the check for
 boundary EOFs and PTS discontinuities.
 
+`curl localhost:8080/debug/pipeline | dot -Tsvg > pipe.svg` dumps the live
+pipeline topology (elements, pads, negotiated caps) — handy for confirming
+the passthrough-vs-encode wiring on a running pod. Or point
+[`gst-dots-viewer`](https://gstreamer.freedesktop.org) at the saved `.dot`.
+
 ## Releasing
 
 Trunk-based `main` + [release-please](https://github.com/googleapis/release-please), with towncrier changelog fragments:

@@ -377,6 +377,17 @@ async fn cold_boot_publishes_and_serves_current() {
         Duration::from_secs(10),
         || describe_ok(&p.rtsp_url).then_some(()),
     );
+
+    // /debug/pipeline dumps the live topology as Graphviz against a real,
+    // playing pipeline — so this proves the dot dump works, not just that the
+    // route is wired.
+    let (status, body) = http_get(p.http, "/debug/pipeline").expect("GET /debug/pipeline");
+    assert_eq!(status, 200);
+    let dot = String::from_utf8(body).expect("dot is utf-8");
+    assert!(
+        dot.contains("digraph"),
+        "expected a graphviz dump, got {dot:?}"
+    );
 }
 
 /// Parity test 2: resume from a pre-seeded lastplayed message — the exact
