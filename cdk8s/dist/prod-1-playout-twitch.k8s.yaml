@@ -51,7 +51,7 @@ spec:
         kubernetes.io/arch: amd64
       containers:
         - name: playout
-          image: ghcr.io/adanalife/playout:0.9.1 # x-release-please-version
+          image: ghcr.io/adanalife/playout:0.10.0 # x-release-please-version
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

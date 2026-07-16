@@ -2,6 +2,13 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.10.0] — 2026-07-16
+
+### Added
+
+- Output-frame telemetry: `playout_output_frames_total` (rate is true output fps) and `playout_output_frame_gaps_total` (PTS jumps past 1.5 frame intervals — visible stalls/drops), tapped at the output tee's sink pad. ([#52](https://github.com/adanalife/playout/pull/52))
+- `/debug/pipeline` HTTP endpoint dumps the live GStreamer topology as Graphviz `.dot` (`debug_to_dot_data`) for on-demand pipeline inspection on a running pod. ([#54](https://github.com/adanalife/playout/pull/54))
+
 ## [v0.9.1] — 2026-07-16
 
 ### Fixed
