@@ -29,10 +29,15 @@ jobs:
           # No PR diff to scope to on a schedule — lint the whole tree.
           VALIDATE_ALL_CODEBASE: true
           ENABLE_GITHUB_PULL_REQUEST_SUMMARY_COMMENT: false
-          # Machine-owned artifacts: synth output is golden-gated by
-          # cdk8s-synth.yml; the lockfiles are machine-generated (and their
-          # hashes trip codespell).
-          FILTER_REGEX_EXCLUDE: '.*cdk8s/dist/.*|.*(^|/)uv\.lock$|.*(^|/)Cargo\.lock$'
+          # Excluded paths:
+          #   - cdk8s/dist/: synth output, golden-gated by cdk8s-synth.yml —
+          #     lint the authoring code, not the artifact.
+          #   - uv.lock / Cargo.lock: machine-generated; their hashes trip
+          #     codespell.
+          #   - towncrier-template.md: a Jinja template that *produces* markdown;
+          #     towncrier requires the .md extension (it picks markup from it),
+          #     but its `{% %}`/`[...]` syntax isn't valid markdown.
+          FILTER_REGEX_EXCLUDE: '.*cdk8s/dist/.*|.*(^|/)uv\.lock$|.*(^|/)Cargo\.lock$|.*(^|/)towncrier-template\.md$'
           # Rust formatting lives in .pre-commit-config.yaml (cargo fmt) and
           # clippy runs in testing.yml against the repo-pinned toolchain with
           # GStreamer present — super-linter's Rust gates would duplicate them
@@ -48,6 +53,12 @@ jobs:
           # disabled until we go through and fix the issues (matches tripbot)
           VALIDATE_JSCPD: false
           VALIDATE_ENV: false
+          # Biome format wants to reformat release-please's machine-owned JSON
+          # (.release-please-manifest.json, release-please-config.json), which
+          # release-please rewrites — fighting it is pointless. No hand-written
+          # JS/TS/JSON in the repo for Biome lint to cover either. (matches obs)
+          VALIDATE_BIOME_FORMAT: false
+          VALIDATE_BIOME_LINT: false
           VALIDATE_CHECKOV: false
           VALIDATE_GITHUB_ACTIONS_ZIZMOR: false
           VALIDATE_JSON_PRETTIER: false
