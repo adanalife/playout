@@ -2,6 +2,21 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.11.0] — 2026-07-16
+
+### Added
+
+- `seek` command verb: move the playhead by a signed duration (`delta_ms`), walking real clip durations across boundaries in either direction and wrapping moves longer than the corpus modulo its total length — the backend for duration-based `!skip`/`!back`. ([#55](https://github.com/adanalife/playout/pull/55))
+- Releases now post a Discord notification linking the tagged `CHANGELOG.md`. ([#59](https://github.com/adanalife/playout/pull/59))
+
+### Fixed
+
+- Tag OTLP metrics with `deployment.environment` set to the k8s namespace (`prod-1`/`stage-1`) to match the rest of the fleet, instead of the NATS env (`production`/`staging`). Playout's series now match the shared Grafana dashboards' and alert rules' env filter. ([#61](https://github.com/adanalife/playout/pull/61))
+
+### Misc
+
+- Extract the clip/playlist engine from `main.rs` into a `player` module, and rename the behavior test harness from `parity` to `behavior`. No behavior change. ([#56](https://github.com/adanalife/playout/pull/56))
+
 ## [v0.10.0] — 2026-07-16
 
 ### Added
