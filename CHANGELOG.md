@@ -2,6 +2,12 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.9.0] — 2026-07-16
+
+### Added
+
+- Tag the Sentry scope with `platform` (twitch/youtube) so per-platform errors are filterable within the shared project. ([#48](https://github.com/adanalife/playout/pull/48))
+
 ## [v0.8.0] — 2026-07-15
 
 ### Changed
