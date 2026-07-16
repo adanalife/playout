@@ -44,6 +44,12 @@ struct NArg {
 }
 
 #[derive(Deserialize)]
+struct DeltaArg {
+    #[serde(default)]
+    delta_ms: i64,
+}
+
+#[derive(Deserialize)]
 struct LastPlayed {
     file: String,
     #[serde(default)]
@@ -117,7 +123,14 @@ impl Control {
     /// publishes. The leaf keeps platforms isolated: a Twitch-triggered skip
     /// must never advance the YouTube stream sharing the env's NATS.
     pub async fn run_commands(self: Arc<Self>, player: SharedPlayer) {
-        const VERBS: [&str; 5] = ["play.random", "play.file", "play.at", "skip", "back"];
+        const VERBS: [&str; 6] = [
+            "play.random",
+            "play.file",
+            "play.at",
+            "skip",
+            "back",
+            "seek",
+        ];
         let base = subject(&self.env, ""); // "tripbot.<env>.vlc."
         let mut subs = Vec::new();
         for verb in VERBS {
@@ -139,6 +152,25 @@ impl Control {
             let verb = verb.to_owned();
             let player = player.clone();
             let payload = msg.payload.clone();
+            // seek resolves its landing spot before touching the pipeline:
+            // the walk discovers clip durations (file I/O), which must stay
+            // off the GLib main loop that clip teardown shares. Only the
+            // final play_index hops onto it, like every other mutation.
+            if verb == "seek" {
+                crate::telemetry::COMMANDS.add(1, &[opentelemetry::KeyValue::new("verb", verb)]);
+                let delta_ms = serde_json::from_slice::<DeltaArg>(&payload)
+                    .map(|a| a.delta_ms)
+                    .unwrap_or(0);
+                if delta_ms == 0 {
+                    continue;
+                }
+                tokio::task::spawn_blocking(move || {
+                    let (index, offset_ms) = player.seek_target(delta_ms);
+                    info!(delta_ms, index, offset_ms, "seek");
+                    glib::idle_add_once(move || player.play_index(index, offset_ms));
+                });
+                continue;
+            }
             glib::idle_add_once(move || dispatch(&player, &verb, &payload));
         }
     }
