@@ -484,6 +484,20 @@ async fn commands_act_and_other_platform_is_isolated() {
     publish_command(nport, "youtube", "back", r#"{"n":1}"#).await;
     let expected = clip_after("clip_b.mp4", CLIPS.len() - 1);
     wait_current(p.http, "back target", |c| c == expected);
+
+    // seek moves the playhead by a signed span, walking real clip durations.
+    // Deltas are 1.5 clips so the landing clip is stable against the few
+    // seconds of playback between the play.file and the seek.
+    publish_command(nport, "youtube", "play.file", r#"{"file":"clip_a.mp4"}"#).await;
+    wait_current(p.http, "seek start", |c| c == "clip_a.mp4");
+    publish_command(nport, "youtube", "seek", r#"{"delta_ms":30000}"#).await;
+    wait_current(p.http, "seek forward target", |c| c == "clip_b.mp4");
+
+    // A negative delta rewinds, wrapping backward through the playlist.
+    publish_command(nport, "youtube", "play.file", r#"{"file":"clip_c.mp4"}"#).await;
+    wait_current(p.http, "rewind start", |c| c == "clip_c.mp4");
+    publish_command(nport, "youtube", "seek", r#"{"delta_ms":-30000}"#).await;
+    wait_current(p.http, "seek backward target", |c| c == "clip_a.mp4");
 }
 
 /// Parity test 4: natural boundaries advance through the playlist and wrap —

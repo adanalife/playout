@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use gst::glib;
 use gst::prelude::*;
 use gstreamer as gst;
+use gstreamer_pbutils as gst_pbutils;
 use tracing::{error, info, warn};
 
 use crate::telemetry;
@@ -40,6 +42,10 @@ pub(crate) struct Player {
     /// Once it exceeds the playlist length the whole corpus is bad and the
     /// error goes fatal instead of spinning through recovery forever.
     pub(crate) recoveries: AtomicUsize,
+    /// Clip durations (ms) by playlist index, discovered on first use by a
+    /// seek walk and cached for the process lifetime (the corpus is immutable
+    /// while running, like `files`).
+    pub(crate) durations: Mutex<HashMap<usize, i64>>,
 }
 
 pub(crate) type SharedPlayer = Arc<Player>;
@@ -53,6 +59,74 @@ fn skip_index(active: usize, n: i32, len: usize) -> usize {
 fn back_index(active: usize, n: i32, len: usize) -> usize {
     let n = (n.max(1) as usize) % len;
     (active + len - n) % len
+}
+
+/// Where a signed playhead move lands: walk the playlist from `pos_ms` into
+/// the `active` clip by `delta_ms`, wrapping in both directions, and return
+/// the landing (index, offset_ms). Any timescale works — after one full lap
+/// the walk has seen every clip's duration, so it reduces what's left modulo
+/// the corpus length and finishes within one more (now fully cached) lap.
+/// `duration_ms` answers per-clip durations; a clip whose duration it can't
+/// give can't be positioned within, so a forward walk lands at the top of
+/// the clip after it and a backward walk at its own top.
+fn seek_walk(
+    active: usize,
+    pos_ms: i64,
+    delta_ms: i64,
+    len: usize,
+    mut duration_ms: impl FnMut(usize) -> Option<i64>,
+) -> (usize, i64) {
+    let mut index = active;
+    let mut offset = pos_ms.max(0).saturating_add(delta_ms);
+    let mut steps = 0;
+    let mut lap_total: i64 = 0;
+    let mut modded = false;
+    while offset < 0 {
+        if steps >= len {
+            if modded {
+                return (index, 0);
+            }
+            offset = offset.rem_euclid(lap_total);
+            steps = 0;
+            modded = true;
+            break;
+        }
+        steps += 1;
+        index = (index + len - 1) % len;
+        match duration_ms(index) {
+            Some(d) if d > 0 => {
+                offset += d;
+                lap_total += d;
+            }
+            _ => return (index, 0),
+        }
+    }
+    loop {
+        match duration_ms(index) {
+            Some(d) if d > 0 && offset < d => return (index, offset),
+            Some(d) if d > 0 => {
+                if steps >= len {
+                    if modded {
+                        return (index, 0);
+                    }
+                    offset %= lap_total;
+                    steps = 0;
+                    modded = true;
+                    continue;
+                }
+                steps += 1;
+                offset -= d;
+                index = (index + 1) % len;
+                lap_total += d;
+            }
+            _ => {
+                if offset == 0 {
+                    return (index, 0);
+                }
+                return ((index + 1) % len, 0);
+            }
+        }
+    }
 }
 
 /// Keeps a resume/play.at seek from landing in a clip's last moments — the
@@ -419,7 +493,7 @@ impl Player {
     /// Redirect playback to `index` (optionally seeked): swap it in as the
     /// prerolled clip, then finish the active clip so concat cuts straight to
     /// it through the same long-lived encoder.
-    fn play_index(self: &Arc<Self>, index: usize, offset_ms: i64) {
+    pub(crate) fn play_index(self: &Arc<Self>, index: usize, offset_ms: i64) {
         self.teardown_preroll();
         self.spawn(index, offset_ms);
         self.jump();
@@ -488,6 +562,34 @@ impl Player {
         };
         Some((basename, position_ms))
     }
+
+    /// Clip duration in ms, from the cache or a pbutils Discoverer parse of
+    /// the container (headers only, no decode). None when the file can't be
+    /// parsed — seek walks treat such a clip as a boundary they land at
+    /// rather than a span they can measure.
+    pub(crate) fn duration_ms(&self, index: usize) -> Option<i64> {
+        if let Some(d) = self.durations.lock().unwrap().get(&index) {
+            return Some(*d);
+        }
+        let disc = gst_pbutils::Discoverer::new(gst::ClockTime::from_seconds(5)).ok()?;
+        let info = disc.discover_uri(&self.uri_at(index)).ok()?;
+        let d = info.duration()?.mseconds() as i64;
+        self.durations.lock().unwrap().insert(index, d);
+        Some(d)
+    }
+
+    /// Resolve the seek verb's signed delta against the live playhead into a
+    /// landing (index, offset_ms). Walks clip durations, which discovers
+    /// files on cache misses — file I/O, so callers must run this OFF the
+    /// GLib main loop (which clip teardown shares) and hand the result to
+    /// play_index there.
+    pub(crate) fn seek_target(&self, delta_ms: i64) -> (usize, i64) {
+        let active = self.active_index();
+        let pos_ms = self.playhead().map(|(_, p)| p).unwrap_or(0);
+        seek_walk(active, pos_ms, delta_ms, self.files.len(), |i| {
+            self.duration_ms(i)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -512,6 +614,48 @@ mod tests {
         assert!(!should_seek_to(59_500, Some(60_000))); // past the end
         assert!(should_seek_to(30_000, None)); // unknown duration errs toward seeking
         assert!(should_seek_to(30_000, Some(0)));
+    }
+
+    #[test]
+    fn seek_walk_moves_by_signed_spans() {
+        use super::seek_walk;
+        // Three 180s clips; -1 marks a clip Discoverer couldn't measure.
+        let durs = |list: &'static [i64]| {
+            move |i: usize| {
+                let d = list[i];
+                (d >= 0).then_some(d)
+            }
+        };
+        let uniform = durs(&[180_000, 180_000, 180_000]);
+
+        // Within the active clip, both directions.
+        assert_eq!(seek_walk(0, 10_000, 5_000, 3, uniform), (0, 15_000));
+        assert_eq!(seek_walk(1, 60_000, -30_000, 3, uniform), (1, 30_000));
+        assert_eq!(seek_walk(1, 5_000, 0, 3, uniform), (1, 5_000));
+
+        // Across boundaries, wrapping in both directions.
+        assert_eq!(seek_walk(0, 170_000, 20_000, 3, uniform), (1, 10_000));
+        assert_eq!(seek_walk(0, 0, 400_000, 3, uniform), (2, 40_000));
+        assert_eq!(seek_walk(2, 170_000, 20_000, 3, uniform), (0, 10_000));
+        assert_eq!(seek_walk(1, 10_000, -30_000, 3, uniform), (0, 160_000));
+        assert_eq!(seek_walk(0, 10_000, -30_000, 3, uniform), (2, 160_000));
+
+        // A clip with an unknown duration is a boundary, not a span: forward
+        // lands at the top of the clip after it, backward at its own top.
+        let holey = durs(&[180_000, -1, 180_000]);
+        assert_eq!(seek_walk(0, 0, 200_000, 3, holey), (2, 0));
+        assert_eq!(seek_walk(2, 10_000, -30_000, 3, holey), (1, 0));
+
+        // Moves longer than the corpus wrap modulo its total length (540s):
+        // +10000s ≡ +280s → clip 1 @ 100s; -10000s ≡ +260s → clip 1 @ 80s.
+        assert_eq!(seek_walk(0, 0, 10_000_000, 3, uniform), (1, 100_000));
+        assert_eq!(seek_walk(0, 0, -10_000_000, 3, uniform), (1, 80_000));
+        // Exact multiples of the corpus land back where they started.
+        assert_eq!(seek_walk(1, 30_000, 5_400_000, 3, uniform), (1, 30_000));
+        assert_eq!(seek_walk(1, 30_000, -5_400_000, 3, uniform), (1, 30_000));
+        // Extreme deltas saturate instead of overflowing, then wrap.
+        let (i, off) = seek_walk(0, 0, i64::MIN, 3, uniform);
+        assert!(i < 3 && (0..180_000).contains(&off));
     }
 
     #[test]

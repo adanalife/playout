@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -266,6 +267,7 @@ async fn run() -> Result<()> {
         clips: Mutex::new(Vec::new()),
         passthrough,
         recoveries: AtomicUsize::new(0),
+        durations: Mutex::new(HashMap::new()),
     });
 
     // Control plane is best-effort: if NATS is down, playout still loops the
@@ -290,6 +292,26 @@ async fn run() -> Result<()> {
     if let Some(control) = control {
         tokio::spawn(control.clone().run_commands(player.clone()));
         tokio::spawn(control.run_ticker(player.clone(), Duration::from_secs(5)));
+
+        // Warm the duration cache so a corpus-scale seek (!skip 10y wraps
+        // modulo the corpus) resolves from the cache instead of discovering
+        // thousands of clips inline. A few workers keep the NFS churn low;
+        // each parse is a moov-header read, not video data. Seeks arriving
+        // mid-warm still work — the walk discovers what it needs itself.
+        const WARM_WORKERS: usize = 4;
+        let warm_remaining = Arc::new(AtomicUsize::new(WARM_WORKERS));
+        for w in 0..WARM_WORKERS {
+            let player = player.clone();
+            let remaining = warm_remaining.clone();
+            tokio::task::spawn_blocking(move || {
+                for i in (w..player.files.len()).step_by(WARM_WORKERS) {
+                    let _ = player.duration_ms(i);
+                }
+                if remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    info!(clips = player.files.len(), "duration cache warmed");
+                }
+            });
+        }
     }
 
     let main_loop = glib::MainLoop::new(None, false);
