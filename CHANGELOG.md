@@ -2,6 +2,16 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.9.1] — 2026-07-16
+
+### Fixed
+
+- A corrupt or unplayable clip no longer kills the pipeline (and, via resume-from-lastplayed, crash-loops on it): the failed clip bin is torn down and playback skips to the next clip, like vlc-server rolling past bad files. Encoder/sink errors stay fatal, and an all-bad playlist still gives up instead of spinning. ([#50](https://github.com/adanalife/playout/pull/50))
+
+### Misc
+
+- Drop `--edit` from the `changelog:add` task so it no longer opens $EDITOR and hangs in non-interactive (Claude/CI) sessions. ([#46](https://github.com/adanalife/playout/pull/46))
+
 ## [v0.9.0] — 2026-07-16
 
 ### Added
