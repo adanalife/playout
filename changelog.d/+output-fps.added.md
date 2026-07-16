@@ -1,0 +1,1 @@
+Output-frame telemetry: `playout_output_frames_total` (rate is true output fps) and `playout_output_frame_gaps_total` (PTS jumps past 1.5 frame intervals — visible stalls/drops), tapped at the output tee's sink pad.

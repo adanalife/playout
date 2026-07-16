@@ -4,10 +4,11 @@
 //!
 //! Signals: a 5s recorder samples the playhead and pipeline running time
 //! (running time ≈ wallclock is the realtime-health check the soaks used),
-//! and counters track clip spawns (every boundary or redirect) and NATS
-//! commands by verb. ponytail: no per-boundary drift histogram yet — the
-//! spawn log lines carry what drift analysis needs; add one if dashboards
-//! outgrow log-based analysis.
+//! a tee-sink pad probe counts output frames and PTS gaps (true output fps
+//! and visible-stall detection), and counters track clip spawns (every
+//! boundary or redirect), clip errors, and NATS commands by verb. ponytail:
+//! no per-boundary drift histogram yet — the spawn log lines carry what
+//! drift analysis needs; add one if dashboards outgrow log-based analysis.
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -40,6 +41,20 @@ pub static COMMANDS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter("playout")
         .u64_counter("playout_commands_total")
         .with_description("NATS playback commands dispatched, by verb")
+        .build()
+});
+
+pub static OUTPUT_FRAMES: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("playout")
+        .u64_counter("playout_output_frames_total")
+        .with_description("Video frames leaving the pipeline (buffers through the output tee); rate() is output fps")
+        .build()
+});
+
+pub static OUTPUT_FRAME_GAPS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("playout")
+        .u64_counter("playout_output_frame_gaps_total")
+        .with_description("Output frames whose PTS jumped >1.5 frame intervals past the previous one (visible stalls/drops)")
         .build()
 });
 
