@@ -23,8 +23,12 @@ jobs:
       # script dir only resolves through a symlink the mise-action cache
       # flattens — restored-cache runs then can't find the pre-commit
       # binary. setup-python's interpreter takes PATH precedence and its
-      # script dir is always on PATH; same pairing as tripbot's workflow.
+      # script dir is always on PATH. The explicit python-version matters:
+      # without it setup-python installs nothing and defers to the python
+      # already on PATH — mise's again.
       - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
       # no-commit-to-branch guards local commits; in CI the checkout is the
       # branch itself, so the hook would false-positive on main.
       - uses: pre-commit/action@v3.0.1
