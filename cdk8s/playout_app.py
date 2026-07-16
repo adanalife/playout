@@ -115,6 +115,11 @@ class PlayoutInstance(Construct):
             "NATS_URL": f"nats://nats.{env.name}-platform.svc.cluster.local:4222",
             "ENV": env.nats_env,
             "STREAM_PLATFORM": platform,
+            # deployment.environment OTLP label = the k8s namespace (prod-1 /
+            # stage-1), matching the Go fleet's OTEL_RESOURCE_ATTRIBUTES so
+            # playout's series match the shared dashboards' env filter, distinct
+            # from ENV, which is the NATS subject env (production / staging).
+            "DEPLOYMENT_ENVIRONMENT": env.namespace,
         }
         cm_name = f"{name}-config"
         _obj(
