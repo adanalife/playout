@@ -67,7 +67,7 @@ fn parse_headers(raw: &str) -> Vec<(String, String)> {
 
 /// Bring up the OTLP meter provider, or None when no endpoint is configured.
 /// The caller holds the provider and shuts it down at exit to flush.
-pub fn init(platform: &str, env: &str) -> Option<SdkMeterProvider> {
+pub fn init(platform: &str, deployment_env: &str) -> Option<SdkMeterProvider> {
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok()?;
     // Endpoint + auth headers passed explicitly: the env-var wiring is what
     // the grafana-cloud-otlp secret ships, same contract as the Go fleet.
@@ -89,14 +89,15 @@ pub fn init(platform: &str, env: &str) -> Option<SdkMeterProvider> {
     // become the service_namespace / service_platform / deployment_environment
     // Prometheus labels the shared dashboards and the
     // `by (service_platform, deployment_environment)` alert rules key off, so
-    // playout's series line up with the rest of the fleet.
+    // playout's series line up with the rest of the fleet. deployment.environment
+    // is the k8s namespace (prod-1 / stage-1), matching the fleet's value.
     let resource = Resource::builder()
         .with_service_name("playout")
         .with_attributes([
             KeyValue::new("service.version", crate::VERSION),
             KeyValue::new("service.namespace", "tripbot"),
             KeyValue::new("service.platform", platform.to_string()),
-            KeyValue::new("deployment.environment", env.to_string()),
+            KeyValue::new("deployment.environment", deployment_env.to_string()),
         ])
         .build();
     let provider = SdkMeterProvider::builder()

@@ -16,6 +16,7 @@ data:
   NATS_URL: nats://nats.stage-1-platform.svc.cluster.local:4222
   ENV: staging
   STREAM_PLATFORM: youtube
+  DEPLOYMENT_ENVIRONMENT: stage-1
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -42,7 +43,7 @@ spec:
         app.kubernetes.io/instance: playout-youtube
         app.kubernetes.io/part-of: tripbot
       annotations:
-        adanalife.dev/config-hash: fa5724e29c
+        adanalife.dev/config-hash: 6260f684de
     spec:
       securityContext:
         seccompProfile:

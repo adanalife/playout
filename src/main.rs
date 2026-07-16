@@ -158,8 +158,13 @@ async fn run() -> Result<()> {
     let nats_env = env_or("ENV", "development");
     let platform = env_or("STREAM_PLATFORM", "youtube");
     let nats_url = env_or("NATS_URL", "nats://localhost:4222");
+    // The deployment.environment OTLP label is the k8s namespace (prod-1 /
+    // stage-1), matching the Go fleet so playout's series share the dashboards'
+    // env filter. Distinct from ENV, which is the NATS subject env
+    // (production / staging). Falls back to the NATS env for local runs.
+    let deployment_env = env_or("DEPLOYMENT_ENVIRONMENT", &nats_env);
 
-    let meter_provider = telemetry::init(&platform, &nats_env);
+    let meter_provider = telemetry::init(&platform, &deployment_env);
 
     let files = scan_video_dir(&video_dir)?;
     info!(
