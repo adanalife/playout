@@ -1,9 +1,9 @@
 # Changelog fragments, assembled by towncrier at release time.
 #
 # Every feature/fix PR drops a fragment in changelog.d/ named <PR>.<type>.md
-# (e.g. 42.fixed.md). Run via uvx — no project dependency:
+# (e.g. 42.fix.md). Run via uvx — no project dependency:
 #
-#   task changelog:add TYPE=fixed                              # scaffold
+#   task changelog:add TYPE=fix                                # scaffold
 #   task changelog:preview                                     # pending notes
 #   task changelog:build VERSION=1.2.0                         # collate
 #
@@ -46,7 +46,7 @@ name = "Removed"
 showcontent = true
 
 [[tool.towncrier.type]]
-directory = "fixed"
+directory = "fix"
 name = "Fixed"
 showcontent = true
 
