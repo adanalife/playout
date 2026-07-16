@@ -42,9 +42,9 @@ pub(crate) struct Player {
     /// Once it exceeds the playlist length the whole corpus is bad and the
     /// error goes fatal instead of spinning through recovery forever.
     pub(crate) recoveries: AtomicUsize,
-    /// Clip durations (ms) by playlist index, discovered on first use by a
-    /// seek walk and cached for the process lifetime (the corpus is immutable
-    /// while running, like `files`).
+    /// Clip durations (ms) by playlist index, discovered by seek walks under
+    /// their per-seek probe budget and cached for the process lifetime (the
+    /// corpus is immutable while running, like `files`).
     pub(crate) durations: Mutex<HashMap<usize, i64>>,
 }
 
@@ -126,6 +126,42 @@ fn seek_walk(
                 return ((index + 1) % len, 0);
             }
         }
+    }
+}
+
+/// Uncached Discoverer parses one seek may spend. Parsing is cheap per clip
+/// (a moov-header read) but a walk that outruns its cache would otherwise
+/// parse the whole corpus in one burst — enough CPU to starve the encoders
+/// sharing the box. Past the budget the walk estimates instead.
+const MAX_SEEK_PROBES: usize = 30;
+
+/// Duration source for one seek: cache hits are free, at most `budget` cache
+/// misses are answered by `probe` (and cached), and every miss past that is
+/// estimated as the mean of the durations known so far — approximate, but
+/// O(budget) file I/O however far the walk travels. None (unparseable clip,
+/// or nothing known to take a mean of) makes the walk land at that clip's
+/// boundary, per its contract.
+fn budgeted_durations<'a>(
+    cache: &'a Mutex<HashMap<usize, i64>>,
+    mut probe: impl FnMut(usize) -> Option<i64> + 'a,
+    budget: usize,
+) -> impl FnMut(usize) -> Option<i64> + 'a {
+    let mut probes = 0;
+    let mut mean = None;
+    move |index| {
+        if let Some(d) = cache.lock().unwrap().get(&index) {
+            return Some(*d);
+        }
+        if probes < budget {
+            probes += 1;
+            let d = probe(index)?;
+            cache.lock().unwrap().insert(index, d);
+            return Some(d);
+        }
+        *mean.get_or_insert_with(|| {
+            let cache = cache.lock().unwrap();
+            (!cache.is_empty()).then(|| cache.values().sum::<i64>() / cache.len() as i64)
+        })
     }
 }
 
@@ -563,32 +599,36 @@ impl Player {
         Some((basename, position_ms))
     }
 
-    /// Clip duration in ms, from the cache or a pbutils Discoverer parse of
-    /// the container (headers only, no decode). None when the file can't be
-    /// parsed — seek walks treat such a clip as a boundary they land at
-    /// rather than a span they can measure.
-    pub(crate) fn duration_ms(&self, index: usize) -> Option<i64> {
-        if let Some(d) = self.durations.lock().unwrap().get(&index) {
-            return Some(*d);
-        }
+    /// Clip duration in ms via a pbutils Discoverer parse of the container
+    /// (headers only, no decode). None when the file can't be parsed — seek
+    /// walks treat such a clip as a boundary they land at rather than a span
+    /// they can measure.
+    fn probe_duration_ms(&self, index: usize) -> Option<i64> {
         let disc = gst_pbutils::Discoverer::new(gst::ClockTime::from_seconds(5)).ok()?;
         let info = disc.discover_uri(&self.uri_at(index)).ok()?;
-        let d = info.duration()?.mseconds() as i64;
-        self.durations.lock().unwrap().insert(index, d);
-        Some(d)
+        Some(info.duration()?.mseconds() as i64)
     }
 
     /// Resolve the seek verb's signed delta against the live playhead into a
-    /// landing (index, offset_ms). Walks clip durations, which discovers
-    /// files on cache misses — file I/O, so callers must run this OFF the
-    /// GLib main loop (which clip teardown shares) and hand the result to
-    /// play_index there.
+    /// landing (index, offset_ms). The walk's duration lookups run on a
+    /// bounded probe budget (see `budgeted_durations`), so a corpus-scale
+    /// seek lands approximately instead of burst-parsing thousands of clips.
+    /// Probing is file I/O, so callers must run this OFF the GLib main loop
+    /// (which clip teardown shares) and hand the result to play_index there.
     pub(crate) fn seek_target(&self, delta_ms: i64) -> (usize, i64) {
         let active = self.active_index();
         let pos_ms = self.playhead().map(|(_, p)| p).unwrap_or(0);
-        seek_walk(active, pos_ms, delta_ms, self.files.len(), |i| {
-            self.duration_ms(i)
-        })
+        seek_walk(
+            active,
+            pos_ms,
+            delta_ms,
+            self.files.len(),
+            budgeted_durations(
+                &self.durations,
+                |i| self.probe_duration_ms(i),
+                MAX_SEEK_PROBES,
+            ),
+        )
     }
 }
 
@@ -656,6 +696,55 @@ mod tests {
         // Extreme deltas saturate instead of overflowing, then wrap.
         let (i, off) = seek_walk(0, 0, i64::MIN, 3, uniform);
         assert!(i < 3 && (0..180_000).contains(&off));
+    }
+
+    #[test]
+    fn budgeted_durations_caps_probes_and_estimates_beyond() {
+        use super::budgeted_durations;
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        let cache: Mutex<HashMap<usize, i64>> = Mutex::new(HashMap::from([(0, 100_000)]));
+        let mut probed = Vec::new();
+        {
+            let mut durs = budgeted_durations(
+                &cache,
+                |i| {
+                    probed.push(i);
+                    Some(200_000)
+                },
+                2,
+            );
+            assert_eq!(durs(0), Some(100_000)); // cache hit costs no probe
+            assert_eq!(durs(1), Some(200_000)); // probed
+            assert_eq!(durs(2), Some(200_000)); // probed — budget spent
+            assert_eq!(durs(3), Some(166_666)); // mean of {100k, 200k, 200k}
+            assert_eq!(durs(1), Some(200_000)); // probe result was cached
+        }
+        assert_eq!(probed, [1, 2]);
+    }
+
+    #[test]
+    fn corpus_scale_seek_probes_at_most_the_budget() {
+        use super::{budgeted_durations, seek_walk};
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        let cache = Mutex::new(HashMap::new());
+        let probed = std::cell::Cell::new(0usize);
+        let durs = budgeted_durations(
+            &cache,
+            |_| {
+                probed.set(probed.get() + 1);
+                Some(180_000)
+            },
+            30,
+        );
+        // A years-long delta over a cold 4406-clip corpus: the walk must
+        // land somewhere sane while parsing only its probe budget.
+        let (i, off) = seek_walk(0, 0, 10 * 365 * 24 * 3_600_000, 4406, durs);
+        assert!(i < 4406 && (0..180_000).contains(&off));
+        assert_eq!(probed.get(), 30);
     }
 
     #[test]
