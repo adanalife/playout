@@ -33,9 +33,13 @@ def _stamp_release_please_markers() -> None:
         if not tag:
             continue
         for path in dist.glob(f"{env_name}-playout-*.k8s.yaml"):
-            pinned_line = f"image: {IMAGE}:{tag}"
             text = path.read_text()
-            path.write_text(text.replace(pinned_line, f"{pinned_line} # {_RP_MARKER}"))
+            # Every rendering of the pin needs the marker: the container's
+            # `image:` line and the PreSync image gate's crane arg. A pin
+            # release-please can't find goes stale and fails the synth gate.
+            for pinned_line in (f"image: {IMAGE}:{tag}", f"- {IMAGE}:{tag}"):
+                text = text.replace(pinned_line, f"{pinned_line} # {_RP_MARKER}")
+            path.write_text(text)
 
 
 def main() -> None:
