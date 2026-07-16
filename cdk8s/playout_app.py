@@ -25,6 +25,11 @@ PART_OF = "tripbot"
 CONFIG_HASH_ANNOTATION = "adanalife.dev/config-hash"
 HTTP_PORT = 8080  # the binary's HTTP_PORT default
 
+# Multi-arch image carrying the `crane` CLI, used by the PreSync image gate to
+# probe the registry. gcr.io (not Docker Hub) — the CI base-image-mirror policy
+# doesn't apply to a runtime cluster pull.
+CRANE_IMAGE = "gcr.io/go-containerregistry/crane:v0.21.7"
+
 # Must match the path baked into the corpus PVs (vlc-server mounts the same
 # claims at the same path).
 DASHCAM_MOUNT = "/opt/data/Dashcam/_all"
@@ -67,6 +72,7 @@ def _obj(
     name: str,
     namespace: str,
     labels: dict | None = None,
+    annotations: dict | None = None,
     **body,
 ):
     """ApiObject takes only apiVersion/kind/metadata as props; other top-level
@@ -74,12 +80,78 @@ def _obj(
     metadata = {"name": name, "namespace": namespace}
     if labels:
         metadata["labels"] = labels
+    if annotations:
+        metadata["annotations"] = annotations
     obj = cdk8s.ApiObject(
         scope, id, api_version=api_version, kind=kind, metadata=metadata
     )
     for key, value in body.items():
         obj.add_json_patch(cdk8s.JsonPatch.add(f"/{key}", value))
     return obj
+
+
+def emit_image_gate(
+    scope: Construct,
+    *,
+    name: str,
+    namespace: str,
+    labels: dict,
+    image_ref: str,
+) -> None:
+    """Argo PreSync hook asserting `image_ref` exists in the registry before the
+    sync reaches the Deployment.
+
+    playout deploys with strategy Recreate (one MediaMTX publisher at a time), so
+    a sync to a not-yet-built tag tears the live pod down first and leaves its
+    replacement in ImagePullBackOff — a stream outage. PreSync hooks must succeed
+    before the main sync wave, so a `crane manifest` that 404s fails the hook,
+    aborts the sync, and leaves the running pod untouched. Re-sync once the image
+    build lands. Only emitted for pinned (immutable-tag) envs — floating tags
+    always resolve to a prior build, so they can't hit this.
+    """
+    _obj(
+        scope,
+        "image-gate",
+        api_version="batch/v1",
+        kind="Job",
+        name=f"{name}-image-gate",
+        namespace=namespace,
+        labels=labels,
+        annotations={
+            "argocd.argoproj.io/hook": "PreSync",
+            # Keep the last gate visible for debugging; replaced on next sync.
+            "argocd.argoproj.io/hook-delete-policy": "BeforeHookCreation",
+        },
+        spec={
+            "backoffLimit": 2,
+            # Cap the wait so a wedged/unschedulable probe fails the sync (pod
+            # safe) instead of stalling PreSync forever.
+            "activeDeadlineSeconds": 120,
+            "template": {
+                "metadata": {"labels": labels},
+                "spec": {
+                    "restartPolicy": "Never",
+                    "nodeSelector": {"kubernetes.io/arch": "amd64"},
+                    "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+                    "containers": [
+                        {
+                            "name": "image-gate",
+                            "image": CRANE_IMAGE,
+                            "args": ["manifest", image_ref],
+                            "securityContext": {
+                                "allowPrivilegeEscalation": False,
+                                "capabilities": {"drop": ["ALL"]},
+                            },
+                            "resources": {
+                                "requests": {"cpu": "10m", "memory": "32Mi"},
+                                "limits": {"memory": "64Mi"},
+                            },
+                        }
+                    ],
+                },
+            },
+        },
+    )
 
 
 class PlayoutInstance(Construct):
@@ -151,9 +223,10 @@ class PlayoutInstance(Construct):
             requests["gpu.intel.com/i915"] = "1"
             limits["gpu.intel.com/i915"] = "1"
 
+        image_ref = f"{IMAGE}:{env.tag_for('playout')}"
         container = {
             "name": "playout",
-            "image": f"{IMAGE}:{env.tag_for('playout')}",
+            "image": image_ref,
             "imagePullPolicy": env.pull_policy_for("playout"),
             "securityContext": {
                 "allowPrivilegeEscalation": False,
@@ -236,6 +309,17 @@ class PlayoutInstance(Construct):
                 },
             },
         )
+
+        # Guard the Recreate teardown against a not-yet-built image (pinned
+        # envs only — floating tags always resolve to a prior build).
+        if env.is_pinned("playout"):
+            emit_image_gate(
+                self,
+                name=name,
+                namespace=ns,
+                labels=labels,
+                image_ref=image_ref,
+            )
 
         # The control-plane surface tripbot/console dial after cutover
         # (VLC_SERVER_HOST=playout-<platform>). Stream data never transits
