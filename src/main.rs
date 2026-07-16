@@ -160,11 +160,12 @@ fn back_index(active: usize, n: i32, len: usize) -> usize {
 
 /// Where a signed playhead move lands: walk the playlist from `pos_ms` into
 /// the `active` clip by `delta_ms`, wrapping in both directions, and return
-/// the landing (index, offset_ms). `duration_ms` answers per-clip durations;
-/// a clip whose duration it can't give can't be positioned within, so a
-/// forward walk lands at the top of the clip after it and a backward walk at
-/// its own top. A move longer than one full lap of the playlist stops where
-/// the lap ends, at top-of-clip.
+/// the landing (index, offset_ms). Any timescale works — after one full lap
+/// the walk has seen every clip's duration, so it reduces what's left modulo
+/// the corpus length and finishes within one more (now fully cached) lap.
+/// `duration_ms` answers per-clip durations; a clip whose duration it can't
+/// give can't be positioned within, so a forward walk lands at the top of
+/// the clip after it and a backward walk at its own top.
 fn seek_walk(
     active: usize,
     pos_ms: i64,
@@ -173,16 +174,27 @@ fn seek_walk(
     mut duration_ms: impl FnMut(usize) -> Option<i64>,
 ) -> (usize, i64) {
     let mut index = active;
-    let mut offset = pos_ms.max(0) + delta_ms;
+    let mut offset = pos_ms.max(0).saturating_add(delta_ms);
     let mut steps = 0;
+    let mut lap_total: i64 = 0;
+    let mut modded = false;
     while offset < 0 {
         if steps >= len {
-            return (index, 0);
+            if modded {
+                return (index, 0);
+            }
+            offset = offset.rem_euclid(lap_total);
+            steps = 0;
+            modded = true;
+            break;
         }
         steps += 1;
         index = (index + len - 1) % len;
         match duration_ms(index) {
-            Some(d) if d > 0 => offset += d,
+            Some(d) if d > 0 => {
+                offset += d;
+                lap_total += d;
+            }
             _ => return (index, 0),
         }
     }
@@ -191,14 +203,21 @@ fn seek_walk(
             Some(d) if d > 0 && offset < d => return (index, offset),
             Some(d) if d > 0 => {
                 if steps >= len {
-                    return (index, 0);
+                    if modded {
+                        return (index, 0);
+                    }
+                    offset %= lap_total;
+                    steps = 0;
+                    modded = true;
+                    continue;
                 }
                 steps += 1;
                 offset -= d;
                 index = (index + 1) % len;
+                lap_total += d;
             }
             _ => {
-                if offset == 0 || steps >= len {
+                if offset == 0 {
                     return (index, 0);
                 }
                 return ((index + 1) % len, 0);
@@ -852,6 +871,26 @@ async fn run() -> Result<()> {
     if let Some(control) = control {
         tokio::spawn(control.clone().run_commands(player.clone()));
         tokio::spawn(control.run_ticker(player.clone(), Duration::from_secs(5)));
+
+        // Warm the duration cache so a corpus-scale seek (!skip 10y wraps
+        // modulo the corpus) resolves from the cache instead of discovering
+        // thousands of clips inline. A few workers keep the NFS churn low;
+        // each parse is a moov-header read, not video data. Seeks arriving
+        // mid-warm still work — the walk discovers what it needs itself.
+        const WARM_WORKERS: usize = 4;
+        let warm_remaining = Arc::new(AtomicUsize::new(WARM_WORKERS));
+        for w in 0..WARM_WORKERS {
+            let player = player.clone();
+            let remaining = warm_remaining.clone();
+            tokio::task::spawn_blocking(move || {
+                for i in (w..player.files.len()).step_by(WARM_WORKERS) {
+                    let _ = player.duration_ms(i);
+                }
+                if remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    info!(clips = player.files.len(), "duration cache warmed");
+                }
+            });
+        }
     }
 
     let main_loop = glib::MainLoop::new(None, false);
@@ -1036,9 +1075,16 @@ mod tests {
         assert_eq!(seek_walk(0, 0, 200_000, 3, holey), (2, 0));
         assert_eq!(seek_walk(2, 10_000, -30_000, 3, holey), (1, 0));
 
-        // A move longer than a full lap stops at the lap, top-of-clip.
-        assert_eq!(seek_walk(0, 0, 10_000_000, 3, uniform), (0, 0));
-        assert_eq!(seek_walk(0, 0, -10_000_000, 3, uniform), (0, 0));
+        // Moves longer than the corpus wrap modulo its total length (540s):
+        // +10000s ≡ +280s → clip 1 @ 100s; -10000s ≡ +260s → clip 1 @ 80s.
+        assert_eq!(seek_walk(0, 0, 10_000_000, 3, uniform), (1, 100_000));
+        assert_eq!(seek_walk(0, 0, -10_000_000, 3, uniform), (1, 80_000));
+        // Exact multiples of the corpus land back where they started.
+        assert_eq!(seek_walk(1, 30_000, 5_400_000, 3, uniform), (1, 30_000));
+        assert_eq!(seek_walk(1, 30_000, -5_400_000, 3, uniform), (1, 30_000));
+        // Extreme deltas saturate instead of overflowing, then wrap.
+        let (i, off) = seek_walk(0, 0, i64::MIN, 3, uniform);
+        assert!(i < 3 && (0..180_000).contains(&off));
     }
 
     #[test]
