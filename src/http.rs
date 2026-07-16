@@ -49,6 +49,21 @@ async fn current(State(player): State<SharedPlayer>) -> String {
     player.current_basename().unwrap_or_default()
 }
 
+/// Live pipeline topology as a Graphviz .dot: every element, pad, and
+/// negotiated caps at this instant. Pipe to `dot -Tsvg` or drop into
+/// gst-dots-viewer to eyeball the passthrough-vs-encode wiring on a running
+/// pod. Empty when GStreamer was built without the debug system.
+async fn pipeline_dot(State(player): State<SharedPlayer>) -> impl IntoResponse {
+    let dot = player
+        .pipeline
+        .debug_to_dot_data(gst::DebugGraphDetails::ALL);
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/vnd.graphviz")],
+        dot.to_string(),
+    )
+}
+
 pub async fn run(player: SharedPlayer) {
     let port = std::env::var("HTTP_PORT")
         .unwrap_or_else(|_| "8080".to_string())
@@ -62,6 +77,7 @@ pub async fn run(player: SharedPlayer) {
         .route("/health/ready", get(ready))
         .route("/version", get(version))
         .route("/vlc/current", get(current))
+        .route("/debug/pipeline", get(pipeline_dot))
         .with_state(player);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
