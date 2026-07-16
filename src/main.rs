@@ -1,6 +1,6 @@
 use std::hash::{BuildHasher, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -133,6 +133,10 @@ struct Player {
     /// Clip bins stop at parsed H.264 instead of decoding, and seeks snap to
     /// keyframes (a compressed stream can't start mid-GOP).
     passthrough: bool,
+    /// Consecutive clip-bin failures absorbed without a clip reaching EOS.
+    /// Once it exceeds the playlist length the whole corpus is bad and the
+    /// error goes fatal instead of spinning through recovery forever.
+    recoveries: AtomicUsize,
 }
 
 type SharedPlayer = Arc<Player>;
@@ -400,6 +404,7 @@ impl Player {
     /// already switched to the prerolled clip. Tear the finished bin down,
     /// stamp the promoted clip active, and preroll its sequential successor.
     fn on_clip_eos(self: &Arc<Self>, decode: &gst::Element, pad: &gst::Pad) {
+        self.recoveries.store(0, Ordering::SeqCst);
         self.clips.lock().unwrap().retain(|c| &c.bin != decode);
         decode.set_state(gst::State::Null).ok();
         self.pipeline.remove(decode).ok();
@@ -414,6 +419,63 @@ impl Player {
         if let Some(next) = next {
             self.spawn(next, 0);
         }
+    }
+
+    /// A clip bin posted an error (corrupt file, or caps that won't negotiate
+    /// under passthrough): the per-clip analogue of vlc-server rolling past a
+    /// bad file. Tear the failed bin down and splice in the clip after it, so
+    /// a garbage `.mp4` mid-corpus — or a resume that lands on one — costs one
+    /// clip, not the pipeline. Returns false when the error is not a clip's
+    /// to absorb: encoder, sink, and pipeline errors stay fatal.
+    fn on_clip_error(self: &Arc<Self>, src: &gst::Object) -> bool {
+        // A torn-down bin's already-queued messages can still arrive; anything
+        // no longer under the pipeline is an echo of a handled failure.
+        if !src.has_as_ancestor(&self.pipeline) {
+            return true;
+        }
+        let (failed, was_active) = {
+            let mut clips = self.clips.lock().unwrap();
+            let Some(pos) = clips.iter().position(|c| src.has_as_ancestor(&c.bin)) else {
+                return false;
+            };
+            (clips.remove(pos), pos == 0)
+        };
+        telemetry::CLIP_ERRORS.add(1, &[]);
+        if self.recoveries.fetch_add(1, Ordering::SeqCst) >= self.files.len() {
+            error!("every clip in the playlist failed consecutively; giving up");
+            return false;
+        }
+        warn!(
+            index = failed.index,
+            file = %self.basename_at(failed.index),
+            was_active,
+            "clip failed; skipping past it"
+        );
+        // Same teardown order as teardown_preroll: release the concat pad
+        // before Null, or the bin's streaming thread parked in concat holds
+        // the stream lock set_state needs. Releasing the *active* pad is also
+        // what makes concat cut to the prerolled clip.
+        if let Some(pad) = failed.pad {
+            self.concat.release_request_pad(&pad);
+        }
+        failed.bin.set_state(gst::State::Null).ok();
+        self.pipeline.remove(&failed.bin).ok();
+        let next = if was_active {
+            self.mark_active();
+            // Preroll the promoted clip's successor, like a natural boundary.
+            self.clips
+                .lock()
+                .unwrap()
+                .first()
+                .map(|c| c.index)
+                .unwrap_or(failed.index)
+        } else {
+            // The preroll failed: replace it with the clip after it, not the
+            // active clip's successor — that would respawn the bad clip.
+            failed.index
+        };
+        self.spawn((next + 1) % self.files.len(), 0);
+        true
     }
 
     /// Pipeline running time: how long the pipeline has been playing, by the
@@ -647,6 +709,7 @@ async fn run() -> Result<()> {
         files,
         clips: Mutex::new(Vec::new()),
         passthrough,
+        recoveries: AtomicUsize::new(0),
     });
 
     // Control plane is best-effort: if NATS is down, playout still loops the
@@ -709,18 +772,29 @@ async fn run() -> Result<()> {
     let failed = Arc::new(AtomicBool::new(false));
     let loop_clone = main_loop.clone();
     let failed_clone = failed.clone();
+    let player_bus = Arc::clone(&player);
     let bus = pipeline.bus().unwrap();
     let _watch = bus.add_watch(move |_, msg| {
         match msg.view() {
             gst::MessageView::Error(err) => {
-                error!(
-                    src = %err.src().map(|s| s.path_string()).unwrap_or_default(),
-                    err = %err.error(),
-                    debug = ?err.debug(),
-                    "pipeline error"
-                );
-                failed_clone.store(true, Ordering::SeqCst);
-                loop_clone.quit();
+                let src = err.src().map(|s| s.path_string()).unwrap_or_default();
+                if err.src().is_some_and(|s| player_bus.on_clip_error(s)) {
+                    warn!(
+                        src = %src,
+                        err = %err.error(),
+                        debug = ?err.debug(),
+                        "clip error absorbed"
+                    );
+                } else {
+                    error!(
+                        src = %src,
+                        err = %err.error(),
+                        debug = ?err.debug(),
+                        "pipeline error"
+                    );
+                    failed_clone.store(true, Ordering::SeqCst);
+                    loop_clone.quit();
+                }
             }
             gst::MessageView::Eos(_) => {
                 // Clip EOS is dropped at the concat pads; this should be
