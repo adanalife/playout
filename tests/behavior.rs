@@ -1,6 +1,6 @@
-//! Behavioral-parity harness: boots the real binary against a real MediaMTX
-//! and NATS (JetStream) and asserts behavior over HTTP, NATS, and RTSP — no
-//! mocks, the same wire tripbot speaks. Realtime throughput is explicitly
+//! Behavior harness: boots the real binary against a real MediaMTX and NATS
+//! (JetStream) and asserts behavior over HTTP, NATS, and RTSP — no mocks, the
+//! same wire tripbot speaks. Realtime throughput is explicitly
 //! out of scope (CI runners can't sustain 1080p60); these tests assert
 //! *behavior*: publish-on-boot, resume, commands, boundaries, shutdown.
 //!

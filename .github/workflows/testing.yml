@@ -21,7 +21,7 @@ jobs:
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
       # -ugly (x264enc), -libav (h264 decode), -rtsp (rtspclientsink), and
-      # -tools (gst-launch, clip generation) are for the parity harness.
+      # -tools (gst-launch, clip generation) are for the behavior harness.
       - name: Install GStreamer
         run: |
           sudo apt-get update
@@ -30,7 +30,7 @@ jobs:
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-ugly gstreamer1.0-libav \
             gstreamer1.0-rtsp gstreamer1.0-tools
-      # Real MediaMTX + NATS for tests/parity.rs — the tests skip when these
+      # Real MediaMTX + NATS for tests/behavior.rs — the tests skip when these
       # are missing, so keep them installed or the harness silently no-ops.
       - name: Install MediaMTX and NATS server
         run: |
