@@ -134,7 +134,7 @@ spec:
           image: gcr.io/go-containerregistry/crane:v0.21.7
           args:
             - manifest
-            - ghcr.io/adanalife/playout:0.11.0
+            - ghcr.io/adanalife/playout:0.11.0 # x-release-please-version
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
