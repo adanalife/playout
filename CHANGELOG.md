@@ -2,6 +2,13 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.11.1] — 2026-07-16
+
+### Fixed
+
+- Long seeks no longer burst-parse the corpus: a seek Discoverer-probes at most 30 uncached clips and estimates the rest from the mean duration seen so far, and the full-corpus duration warm at startup is gone. An unbounded walk could parse all 4406 clips at once (10+ cores), starving the encoders sharing the box. ([#62](https://github.com/adanalife/playout/pull/62))
+- Add an Argo PreSync hook that verifies the pinned image exists in the registry before a sync tears down the running pod, preventing an ImagePullBackOff outage when a deploy is synced ahead of its image build. ([#63](https://github.com/adanalife/playout/pull/63))
+
 ## [v0.11.0] — 2026-07-16
 
 ### Added
