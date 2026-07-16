@@ -54,3 +54,18 @@ jobs:
           push: true
           cache-from: type=gha,scope=playout
           cache-to: type=gha,mode=max,scope=playout
+
+  notify:
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Discord notification
+        uses: Ilshidur/action-discord@0.4.0
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          VERSION_TAG: ${{ github.ref_name }}
+        with:
+          # Link the tagged CHANGELOG.md, not a payload `compare` URL: releases
+          # dispatch via workflow_dispatch, whose event payload has no `compare`.
+          args: 'New Docker image released for [{{ EVENT_PAYLOAD.repository.full_name }}]({{ EVENT_PAYLOAD.repository.html_url }}): [{{ VERSION_TAG }}]({{ EVENT_PAYLOAD.repository.html_url }}/blob/{{ VERSION_TAG }}/CHANGELOG.md)'
