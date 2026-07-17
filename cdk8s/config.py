@@ -75,12 +75,15 @@ ENVS: dict[str, EnvConfig] = {
         name="prod-1",
         namespace="prod-1",
         nats_env="production",
-        platforms=("youtube", "twitch"),
+        platforms=("youtube", "twitch", "facebook"),
         # playout-youtube is parked while the YouTube Data API quota extension
         # is pending — the whole prod-youtube stack (tripbot/onscreens, the obs
         # encoder) is staged, not live, so nothing consumes the youtube relay.
+        # playout-facebook is staged parked the same way: the prod obs-facebook /
+        # relay stack isn't live yet, so nothing consumes the facebook relay
+        # until the stack is unparked for a go-live.
         # Parking frees the instance's CPU request on the minipc.
-        parked_platforms=("youtube",),
+        parked_platforms=("youtube", "facebook"),
         image_tag="latest",  # overridden by the versions.yaml pin
         dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
         cpu_request="2",

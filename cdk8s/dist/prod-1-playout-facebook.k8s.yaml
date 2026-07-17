@@ -1,0 +1,166 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app: playout-facebook
+    app.kubernetes.io/instance: playout-facebook
+    app.kubernetes.io/name: playout
+    app.kubernetes.io/part-of: tripbot
+  name: playout-facebook-config
+  namespace: prod-1
+data:
+  VIDEO_DIR: /opt/data/Dashcam/_all
+  OUTPUT: rtsp
+  ENCODER: passthrough
+  RTSP_URL: rtsp://mediamtx-facebook:8554/dashcam
+  NATS_URL: nats://nats.prod-1-platform.svc.cluster.local:4222
+  ENV: production
+  STREAM_PLATFORM: facebook
+  DEPLOYMENT_ENVIRONMENT: prod-1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: playout-facebook
+    app.kubernetes.io/instance: playout-facebook
+    app.kubernetes.io/name: playout
+    app.kubernetes.io/part-of: tripbot
+  name: playout-facebook
+  namespace: prod-1
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: playout-facebook
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: playout-facebook
+        app.kubernetes.io/name: playout
+        app.kubernetes.io/instance: playout-facebook
+        app.kubernetes.io/part-of: tripbot
+      annotations:
+        adanalife.dev/config-hash: 1bec4ebdb1
+    spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      containers:
+        - name: playout
+          image: ghcr.io/adanalife/playout:0.12.0 # x-release-please-version
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: playout-facebook-config
+            - secretRef:
+                name: sentry-playout
+                optional: true
+            - secretRef:
+                name: grafana-cloud-otlp
+                optional: true
+          volumeMounts:
+            - name: dashcam
+              mountPath: /opt/data/Dashcam/_all
+              readOnly: true
+          resources:
+            requests:
+              cpu: "2"
+              memory: 512Mi
+            limits:
+              memory: 4Gi
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 10
+      volumes:
+        - name: dashcam
+          persistentVolumeClaim:
+            claimName: vlc-dashcam-local
+            readOnly: true
+      priorityClassName: prod-stream
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+  labels:
+    app: playout-facebook
+    app.kubernetes.io/instance: playout-facebook
+    app.kubernetes.io/name: playout
+    app.kubernetes.io/part-of: tripbot
+  name: playout-facebook-image-gate
+  namespace: prod-1
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        app: playout-facebook
+        app.kubernetes.io/name: playout
+        app.kubernetes.io/instance: playout-facebook
+        app.kubernetes.io/part-of: tripbot
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: image-gate
+          image: gcr.io/go-containerregistry/crane:v0.21.7
+          args:
+            - manifest
+            - ghcr.io/adanalife/playout:0.12.0 # x-release-please-version
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: playout-facebook
+    app.kubernetes.io/instance: playout-facebook
+    app.kubernetes.io/name: playout
+    app.kubernetes.io/part-of: tripbot
+  name: playout-facebook
+  namespace: prod-1
+spec:
+  selector:
+    app: playout-facebook
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
