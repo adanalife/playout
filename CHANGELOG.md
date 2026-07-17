@@ -2,6 +2,12 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.11.3] — 2026-07-17
+
+### Fixed
+
+- Frame-gap detection now keys off DTS instead of PTS. In the passthrough path the tee-sink probe sees H.264 access units in decode order, where PTS is non-monotonic (B-frame reordering) — so the PTS-based check false-fired on roughly half of all frames, making `playout_output_frame_gaps_total` read ~1800/min on a healthy 60fps stream. DTS is monotonic in decode order, so a jump is a genuine late frame; raw video carries no DTS and falls back to PTS (already in presentation order there). ([#68](https://github.com/adanalife/playout/pull/68))
+
 ## [v0.11.2] — 2026-07-17
 
 ### Fixed
