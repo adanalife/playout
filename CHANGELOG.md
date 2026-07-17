@@ -2,6 +2,16 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.12.0] — 2026-07-17
+
+### Added
+
+- Stage runs playout-facebook (publishing to the mediamtx-facebook relay) with playout-youtube parked ([#71](https://github.com/adanalife/playout/pull/71))
+
+### Changed
+
+- Add a `parked_platforms` cdk8s knob (same shape as the tripbot/obs repos) and park prod playout-youtube at replicas:0 while the YouTube Data API quota extension is pending ([#70](https://github.com/adanalife/playout/pull/70))
+
 ## [v0.11.3] — 2026-07-17
 
 ### Fixed
