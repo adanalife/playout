@@ -2,6 +2,12 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.13.0] — 2026-07-17
+
+### Added
+
+- Add a parked prod-1 playout-facebook instance (replicas:0) feeding the mediamtx-facebook relay; renders at the pinned image and unparks for a Facebook go-live. ([#73](https://github.com/adanalife/playout/pull/73))
+
 ## [v0.12.0] — 2026-07-17
 
 ### Added
