@@ -110,11 +110,13 @@ fn make_window_branch() -> Result<Vec<gst::Element>> {
     Ok(vec![queue, convert, sink])
 }
 
-/// One output frame's PTS is a "gap" when it lands more than `threshold_ns`
-/// after the previous frame — a visible stall or drop. `prev_ns == u64::MAX`
-/// is the "no previous frame yet" sentinel (first buffer never counts).
-fn is_frame_gap(prev_ns: u64, pts_ns: u64, threshold_ns: u64) -> bool {
-    prev_ns != u64::MAX && pts_ns > prev_ns.saturating_add(threshold_ns)
+/// One output frame is a "gap" when its timestamp lands more than
+/// `threshold_ns` after the previous frame's — a visible stall or drop. The
+/// caller feeds DTS (monotonic in decode order), so a jump means a late frame,
+/// not B-frame PTS reordering. `prev_ns == u64::MAX` is the "no previous frame
+/// yet" sentinel (first buffer never counts).
+fn is_frame_gap(prev_ns: u64, ts_ns: u64, threshold_ns: u64) -> bool {
+    prev_ns != u64::MAX && ts_ns > prev_ns.saturating_add(threshold_ns)
 }
 
 fn main() -> Result<()> {
@@ -193,22 +195,27 @@ async fn run() -> Result<()> {
     // the branch split, so it counts frames regardless of how many outputs are
     // wired. Every buffer here is one frame: raw video in the decoded path,
     // one parsed H.264 access unit in passthrough. rate(playout_output_frames_total)
-    // is the true output fps. A PTS jump past the gap threshold is a frame the
-    // viewer saw stall or drop — concat keeps running time continuous across
+    // is the true output fps. A timestamp jump past the gap threshold is a frame
+    // the viewer saw stall or drop — concat keeps running time continuous across
     // splices, so a gap means a real hitch, not a boundary.
+    // Gap detection keys off DTS: in passthrough the buffers arrive in decode
+    // order, where PTS is non-monotonic (B-frame reorder) and would false-fire
+    // on every reordered frame — DTS is monotonic, so a jump is a genuine late
+    // frame. Raw video carries no DTS, so dts_or_pts falls back to PTS, which
+    // is already in presentation order there.
     // ponytail: thresholds hard-coded for the corpus's fixed 1080p60; derive
     // from the caps framerate if playout ever runs a non-60 stream.
     const FRAME_INTERVAL_NS: u64 = 1_000_000_000 / 60;
     const GAP_THRESHOLD_NS: u64 = FRAME_INTERVAL_NS * 3 / 2;
-    let last_pts = AtomicU64::new(u64::MAX);
+    let last_ts = AtomicU64::new(u64::MAX);
     tee.static_pad("sink")
         .expect("tee always has a static sink pad")
         .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
             if let Some(gst::PadProbeData::Buffer(ref buf)) = info.data {
                 telemetry::OUTPUT_FRAMES.add(1, telemetry::attrs());
-                if let Some(pts) = buf.pts() {
-                    let prev = last_pts.swap(pts.nseconds(), Ordering::Relaxed);
-                    if is_frame_gap(prev, pts.nseconds(), GAP_THRESHOLD_NS) {
+                if let Some(ts) = buf.dts_or_pts() {
+                    let prev = last_ts.swap(ts.nseconds(), Ordering::Relaxed);
+                    if is_frame_gap(prev, ts.nseconds(), GAP_THRESHOLD_NS) {
                         telemetry::OUTPUT_FRAME_GAPS.add(1, telemetry::attrs());
                     }
                 }
@@ -408,7 +415,7 @@ mod tests {
         assert!(!is_frame_gap(0, interval, threshold)); // steady 60fps step
         assert!(!is_frame_gap(0, interval, threshold)); // exactly one interval
         assert!(is_frame_gap(0, interval * 2, threshold)); // a frame missing
-        assert!(!is_frame_gap(interval * 5, interval * 4, threshold)); // non-increasing PTS
+        assert!(!is_frame_gap(interval * 5, interval * 4, threshold)); // non-increasing timestamp
     }
 
     #[test]
