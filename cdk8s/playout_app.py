@@ -295,7 +295,7 @@ class PlayoutInstance(Construct):
             namespace=ns,
             labels=labels,
             spec={
-                "replicas": 1,
+                "replicas": env.replicas_for(platform),
                 "selector": {"matchLabels": {"app": name}},
                 # Recreate: two publishers racing on the same MediaMTX path
                 # would fight over it; one owner at a time.

@@ -33,6 +33,15 @@ class EnvConfig:
     # Platform instances to render.
     platforms: tuple[str, ...] = ("youtube",)
 
+    # Subset of `platforms` whose Deployment renders with spec.replicas=0 —
+    # present but parked, so bringing one up is a scale-up rather than a new
+    # manifest. Same knob as the tripbot/obs/gateway repos.
+    parked_platforms: tuple[str, ...] = ()
+
+    def replicas_for(self, platform: str) -> int:
+        """spec.replicas for a platform's Deployment: 0 when parked, else 1."""
+        return 0 if platform in self.parked_platforms else 1
+
     # Which PVC holds the dashcam corpus: the NFS-backed `vlc-dashcam` or the
     # node-local copy `vlc-dashcam-local` (same claims vlc-server mounts).
     dashcam_claim: str = "vlc-dashcam"
@@ -67,6 +76,11 @@ ENVS: dict[str, EnvConfig] = {
         namespace="prod-1",
         nats_env="production",
         platforms=("youtube", "twitch"),
+        # playout-youtube is parked while the YouTube Data API quota extension
+        # is pending — the whole prod-youtube stack (tripbot/onscreens, the obs
+        # encoder) is staged, not live, so nothing consumes the youtube relay.
+        # Parking frees the instance's CPU request on the minipc.
+        parked_platforms=("youtube",),
         image_tag="latest",  # overridden by the versions.yaml pin
         dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
         cpu_request="2",
