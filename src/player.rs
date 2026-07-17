@@ -228,7 +228,7 @@ impl Player {
     pub(crate) fn spawn(self: &Arc<Self>, index: usize, offset_ms: i64) {
         let uri = self.uri_at(index);
         info!(index, uri = %uri, offset_ms, "spawning clip");
-        telemetry::CLIP_SPAWNS.add(1, &[]);
+        telemetry::CLIP_SPAWNS.add(1, telemetry::attrs());
         let decode = gst::ElementFactory::make("uridecodebin3")
             .property("uri", &uri)
             .build()
@@ -453,7 +453,7 @@ impl Player {
             };
             (clips.remove(pos), pos == 0)
         };
-        telemetry::CLIP_ERRORS.add(1, &[]);
+        telemetry::CLIP_ERRORS.add(1, telemetry::attrs());
         if self.recoveries.fetch_add(1, Ordering::SeqCst) >= self.files.len() {
             error!("every clip in the playlist failed consecutively; giving up");
             return false;

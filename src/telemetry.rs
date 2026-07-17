@@ -11,6 +11,7 @@
 //! drift analysis needs; add one if dashboards outgrow log-based analysis.
 
 use std::sync::LazyLock;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
@@ -22,6 +23,28 @@ use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tracing::{info, warn};
 
 use crate::SharedPlayer;
+
+/// `service.platform` stamped onto every metric data point. Grafana Cloud's
+/// OTLP gateway promotes a data-point attribute to a per-series Prometheus
+/// label, whereas the same attribute on the *resource* only reaches
+/// target_info — so the shared dashboards' `service_platform=~"$platform"`
+/// filter matches series only when it's stamped here. The Go fleet does the
+/// identical per-record stamp (pkg/instrumentation platformAttr). Set once by
+/// `init`; empty on local/test runs so no attribute is attached.
+static PLATFORM_ATTR: OnceLock<[KeyValue; 1]> = OnceLock::new();
+
+/// Data-point attributes to stamp on every metric record — the platform, once
+/// `init` has run, else nothing.
+pub fn attrs() -> &'static [KeyValue] {
+    PLATFORM_ATTR.get().map_or(&[], |a| a.as_slice())
+}
+
+/// `attrs()` plus one call-site attribute (e.g. a command verb).
+pub fn attrs_with(extra: KeyValue) -> Vec<KeyValue> {
+    let mut v = attrs().to_vec();
+    v.push(extra);
+    v
+}
 
 pub static CLIP_SPAWNS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter("playout")
@@ -68,6 +91,9 @@ fn parse_headers(raw: &str) -> Vec<(String, String)> {
 /// Bring up the OTLP meter provider, or None when no endpoint is configured.
 /// The caller holds the provider and shuts it down at exit to flush.
 pub fn init(platform: &str, deployment_env: &str) -> Option<SdkMeterProvider> {
+    // Stamped onto every data point via attrs(); this is what becomes the
+    // service_platform series label the dashboards filter on.
+    let _ = PLATFORM_ATTR.set([KeyValue::new("service.platform", platform.to_string())]);
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok()?;
     // Endpoint + auth headers passed explicitly: the env-var wiring is what
     // the grafana-cloud-otlp secret ships, same contract as the Go fleet.
@@ -85,12 +111,14 @@ pub fn init(platform: &str, deployment_env: &str) -> Option<SdkMeterProvider> {
         }
     };
     // Fleet label convention (Go pkg/telemetry via OTEL_RESOURCE_ATTRIBUTES):
-    // service.namespace=tripbot, service.platform, deployment.environment. These
-    // become the service_namespace / service_platform / deployment_environment
-    // Prometheus labels the shared dashboards and the
-    // `by (service_platform, deployment_environment)` alert rules key off, so
-    // playout's series line up with the rest of the fleet. deployment.environment
-    // is the k8s namespace (prod-1 / stage-1), matching the fleet's value.
+    // service.namespace=tripbot, deployment.environment. Grafana Cloud promotes
+    // these standard resource attributes onto every metric series as the
+    // service_namespace / deployment_environment Prometheus labels the shared
+    // dashboards and alert rules key off. deployment.environment is the k8s
+    // namespace (prod-1 / stage-1), matching the fleet's value. service.platform
+    // is custom, so the gateway files it into target_info only — the series
+    // label the `by (service_platform, ...)` queries need comes from the
+    // per-record stamp in attrs(), not from here.
     let resource = Resource::builder()
         .with_service_name("playout")
         .with_attributes([
@@ -125,10 +153,10 @@ pub fn spawn_recorder(player: SharedPlayer) {
             .build();
         loop {
             if let Some((_, pos)) = player.playhead() {
-                playhead.record(pos, &[]);
+                playhead.record(pos, attrs());
             }
             if let Some(rt) = player.running_time() {
-                running.record(rt.mseconds(), &[]);
+                running.record(rt.mseconds(), attrs());
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }

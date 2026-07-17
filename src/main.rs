@@ -205,11 +205,11 @@ async fn run() -> Result<()> {
         .expect("tee always has a static sink pad")
         .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
             if let Some(gst::PadProbeData::Buffer(ref buf)) = info.data {
-                telemetry::OUTPUT_FRAMES.add(1, &[]);
+                telemetry::OUTPUT_FRAMES.add(1, telemetry::attrs());
                 if let Some(pts) = buf.pts() {
                     let prev = last_pts.swap(pts.nseconds(), Ordering::Relaxed);
                     if is_frame_gap(prev, pts.nseconds(), GAP_THRESHOLD_NS) {
-                        telemetry::OUTPUT_FRAME_GAPS.add(1, &[]);
+                        telemetry::OUTPUT_FRAME_GAPS.add(1, telemetry::attrs());
                     }
                 }
             }

@@ -157,7 +157,10 @@ impl Control {
             // off the GLib main loop that clip teardown shares. Only the
             // final play_index hops onto it, like every other mutation.
             if verb == "seek" {
-                crate::telemetry::COMMANDS.add(1, &[opentelemetry::KeyValue::new("verb", verb)]);
+                crate::telemetry::COMMANDS.add(
+                    1,
+                    &crate::telemetry::attrs_with(opentelemetry::KeyValue::new("verb", verb)),
+                );
                 let delta_ms = serde_json::from_slice::<DeltaArg>(&payload)
                     .map(|a| a.delta_ms)
                     .unwrap_or(0);
@@ -215,8 +218,10 @@ fn dispatch(player: &SharedPlayer, verb: &str, payload: &[u8]) {
         verb,
         "play.random" | "play.file" | "play.at" | "skip" | "back"
     ) {
-        crate::telemetry::COMMANDS
-            .add(1, &[opentelemetry::KeyValue::new("verb", verb.to_string())]);
+        crate::telemetry::COMMANDS.add(
+            1,
+            &crate::telemetry::attrs_with(opentelemetry::KeyValue::new("verb", verb.to_string())),
+        );
     }
     match verb {
         "play.random" => player.play_random(),
