@@ -95,6 +95,10 @@ ENVS: dict[str, EnvConfig] = {
         namespace="stage-1",
         nats_env="staging",
         image_tag="main",
+        # facebook is the active stage platform (feeds obs-facebook via the
+        # mediamtx-facebook relay); youtube stays present but parked.
+        platforms=("youtube", "facebook"),
+        parked_platforms=("youtube",),
         # Same encode mode as prod so the stage soak transfers.
         cpu_request="2",
         encoder="passthrough",
