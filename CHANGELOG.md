@@ -2,6 +2,12 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.11.2] — 2026-07-17
+
+### Fixed
+
+- Stamp `service.platform` onto every metric data point, not just the OTLP resource. Grafana Cloud promotes a data-point attribute to a per-series `service_platform` label but files a custom *resource* attribute into `target_info` only, so the shared "playout ↔ MediaMTX" dashboard's `service_platform=~"$platform"` filter matched no playout series and every playout panel read empty. Mirrors the Go fleet's per-record platform stamp. ([#66](https://github.com/adanalife/playout/pull/66))
+
 ## [v0.11.1] — 2026-07-16
 
 ### Fixed
