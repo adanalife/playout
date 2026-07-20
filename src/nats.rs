@@ -62,17 +62,49 @@ pub struct Control {
     platform: String,
 }
 
-/// Connect to NATS and ensure the lastplayed stream exists. Returns None if the
-/// connection fails — the caller then runs without a control plane rather than
-/// aborting the stream.
+/// Connect to NATS and ensure the lastplayed stream exists. Returns None only
+/// on a non-retryable config error; a server that's merely unreachable yields a
+/// client that keeps dialing in the background (`retry_on_initial_connect`).
+///
+/// That retry is the fix for the boot-race — a node reboot bringing NATS up
+/// alongside playout — that used to leave the control plane permanently dead:
+/// the command subscriptions queue client-side and flush the moment NATS
+/// answers, and `playout_nats_connected` tracks the live state via the event
+/// callback so the gap is visible on the dashboard.
 pub async fn connect(env: String, platform: String, url: String) -> Option<Control> {
-    let client = match async_nats::connect(&url).await {
+    let client = match async_nats::ConnectOptions::new()
+        .retry_on_initial_connect()
+        .event_callback(|event| async move {
+            match event {
+                async_nats::Event::Connected => {
+                    info!("nats connected");
+                    crate::telemetry::set_nats_connected(true);
+                }
+                async_nats::Event::Disconnected => {
+                    warn!("nats disconnected; control plane paused until reconnect");
+                    crate::telemetry::set_nats_connected(false);
+                }
+                _ => {}
+            }
+        })
+        .connect(&url)
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             warn!(err = %e, url = %url, "nats connect failed; control plane disabled");
             return None;
         }
     };
+
+    // retry_on_initial_connect returns before the first handshake completes, so
+    // wait a bounded spell for it here — otherwise the resume read below races
+    // the connection and every boot cold-starts on a random clip. If NATS is
+    // genuinely down the wait times out and we proceed anyway: resume is skipped
+    // this boot, but the queued subscriptions still wire the control plane up
+    // once NATS recovers.
+    wait_for_connect(&client, Duration::from_secs(10)).await;
+
     let js = jetstream::new(client.clone());
     // Idempotent: vlc-server may already have declared this with the same
     // config. A mismatch just logs — the stream still exists, so publishes to
@@ -91,6 +123,21 @@ pub async fn connect(env: String, platform: String, url: String) -> Option<Contr
         env,
         platform,
     })
+}
+
+/// Poll the client's connection state until it's connected or `timeout`
+/// elapses. Used right after `retry_on_initial_connect` so the startup resume
+/// read lands on a live connection when NATS is merely slow to come up, without
+/// blocking the stream indefinitely when it's down for good.
+async fn wait_for_connect(client: &async_nats::Client, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while client.connection_state() != async_nats::connection::State::Connected {
+        if tokio::time::Instant::now() >= deadline {
+            warn!("nats not connected within startup window; resume may cold-start");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 impl Control {

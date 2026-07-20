@@ -12,6 +12,7 @@
 
 use std::sync::LazyLock;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
@@ -23,6 +24,20 @@ use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tracing::{info, warn};
 
 use crate::SharedPlayer;
+
+/// NATS control-plane connection state, exported by the recorder as
+/// `playout_nats_connected`. Flipped by the connect result and async_nats
+/// connect/disconnect events (see `nats::connect`). Starts false: until the
+/// first successful connect the control plane is down and playback commands
+/// (find/goto/timewarp/skip) are silently dropped even though the corpus keeps
+/// looping — the exact boot-race this metric exists to surface.
+static NATS_CONNECTED: AtomicBool = AtomicBool::new(false);
+
+/// Record whether the NATS control-plane connection is currently up. Called
+/// from the nats module on connect (true) and disconnect (false).
+pub fn set_nats_connected(connected: bool) {
+    NATS_CONNECTED.store(connected, Ordering::Relaxed);
+}
 
 /// `service.platform` stamped onto every metric data point. Grafana Cloud's
 /// OTLP gateway promotes a data-point attribute to a per-series Prometheus
@@ -151,6 +166,14 @@ pub fn spawn_recorder(player: SharedPlayer) {
             .u64_gauge("playout_pipeline_running_time_ms")
             .with_description("Pipeline running time (advances ~1s/s when realtime holds)")
             .build();
+        let nats_connected = meter
+            .u64_gauge("playout_nats_connected")
+            .with_description(
+                "1 while the NATS control-plane connection is up, 0 while down. A 0 means \
+                 playback commands (find/goto/timewarp/skip) are being dropped even though the \
+                 corpus still loops — catches the boot-race where playout starts before NATS.",
+            )
+            .build();
         loop {
             if let Some((_, pos)) = player.playhead() {
                 playhead.record(pos, attrs());
@@ -158,6 +181,7 @@ pub fn spawn_recorder(player: SharedPlayer) {
             if let Some(rt) = player.running_time() {
                 running.record(rt.mseconds(), attrs());
             }
+            nats_connected.record(NATS_CONNECTED.load(Ordering::Relaxed) as u64, attrs());
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
