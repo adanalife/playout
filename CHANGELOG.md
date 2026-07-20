@@ -2,6 +2,12 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.13.1] — 2026-07-20
+
+### Fixed
+
+- Retry the initial NATS connection instead of disabling the control plane for the life of the pod. A boot-race — playout starting before NATS is reachable — no longer silently drops every playback command (`!find`/`!goto`/`!timewarp`/`!skip`) while the stream keeps looping; the queued subscriptions now flush once NATS answers. A new `playout_nats_connected` gauge (1 up / 0 down) surfaces the connection state on the dashboard. ([#76](https://github.com/adanalife/playout/pull/76))
+
 ## [v0.13.0] — 2026-07-17
 
 ### Added
