@@ -2,6 +2,16 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.15.0] — 2026-07-21
+
+### Changed
+
+- The supported-platform set now comes from platform-gateway's generated `platforms.json` (synced via `task platforms:sync`) rather than a hardcoded per-env list — prod-1 and stage-1 synthesize the full supported set (adding parked `instagram`/`tiktok`), and a future platform is picked up by re-syncing. A `platforms-contract` CI check keeps the synced copy matched to the gateway. ([#86](https://github.com/adanalife/playout/pull/86))
+
+### Fixed
+
+- Match prod-1 playout deploy units by glob in release-please's version-pin set, so every prod platform's image tag bumps in lockstep on release and new platforms are picked up without editing the config. ([#88](https://github.com/adanalife/playout/pull/88))
+
 ## [v0.14.0] — 2026-07-21
 
 ### Changed
