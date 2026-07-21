@@ -2,48 +2,48 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   labels:
-    app: playout-twitch
-    app.kubernetes.io/instance: playout-twitch
+    app: playout-tiktok
+    app.kubernetes.io/instance: playout-tiktok
     app.kubernetes.io/name: playout
     app.kubernetes.io/part-of: tripbot
-  name: playout-twitch-config
+  name: playout-tiktok-config
   namespace: prod-1
 data:
   VIDEO_DIR: /opt/data/Dashcam/_all
   OUTPUT: rtsp
   ENCODER: passthrough
-  RTSP_URL: rtsp://mediamtx-twitch:8554/dashcam
+  RTSP_URL: rtsp://mediamtx-tiktok:8554/dashcam
   NATS_URL: nats://nats.prod-1-platform.svc.cluster.local:4222
   ENV: production
-  STREAM_PLATFORM: twitch
+  STREAM_PLATFORM: tiktok
   DEPLOYMENT_ENVIRONMENT: prod-1
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
-    app: playout-twitch
-    app.kubernetes.io/instance: playout-twitch
+    app: playout-tiktok
+    app.kubernetes.io/instance: playout-tiktok
     app.kubernetes.io/name: playout
     app.kubernetes.io/part-of: tripbot
-  name: playout-twitch
+  name: playout-tiktok
   namespace: prod-1
 spec:
   replicas: 0
   selector:
     matchLabels:
-      app: playout-twitch
+      app: playout-tiktok
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app: playout-twitch
+        app: playout-tiktok
         app.kubernetes.io/name: playout
-        app.kubernetes.io/instance: playout-twitch
+        app.kubernetes.io/instance: playout-tiktok
         app.kubernetes.io/part-of: tripbot
       annotations:
-        adanalife.dev/config-hash: da6d4fa6f2
+        adanalife.dev/config-hash: facdce8f2e
     spec:
       securityContext:
         seccompProfile:
@@ -61,7 +61,7 @@ spec:
                 - ALL
           envFrom:
             - configMapRef:
-                name: playout-twitch-config
+                name: playout-tiktok-config
             - secretRef:
                 name: sentry-playout
                 optional: true
@@ -106,11 +106,11 @@ metadata:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
   labels:
-    app: playout-twitch
-    app.kubernetes.io/instance: playout-twitch
+    app: playout-tiktok
+    app.kubernetes.io/instance: playout-tiktok
     app.kubernetes.io/name: playout
     app.kubernetes.io/part-of: tripbot
-  name: playout-twitch-image-gate
+  name: playout-tiktok-image-gate
   namespace: prod-1
 spec:
   backoffLimit: 2
@@ -118,9 +118,9 @@ spec:
   template:
     metadata:
       labels:
-        app: playout-twitch
+        app: playout-tiktok
         app.kubernetes.io/name: playout
-        app.kubernetes.io/instance: playout-twitch
+        app.kubernetes.io/instance: playout-tiktok
         app.kubernetes.io/part-of: tripbot
     spec:
       restartPolicy: Never
@@ -151,35 +151,16 @@ apiVersion: v1
 kind: Service
 metadata:
   labels:
-    app: playout-twitch
-    app.kubernetes.io/instance: playout-twitch
+    app: playout-tiktok
+    app.kubernetes.io/instance: playout-tiktok
     app.kubernetes.io/name: playout
     app.kubernetes.io/part-of: tripbot
-  name: playout-twitch
+  name: playout-tiktok
   namespace: prod-1
 spec:
   selector:
-    app: playout-twitch
+    app: playout-tiktok
   ports:
     - name: http
       port: 8080
       targetPort: http
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  labels:
-    app.kubernetes.io/part-of: tripbot
-  name: sentry-playout
-  namespace: prod-1
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    name: aws-parameterstore
-    kind: SecretStore
-  target:
-    name: sentry-playout
-    creationPolicy: Owner
-  dataFrom:
-    - extract:
-        key: /k8s/sentry-playout

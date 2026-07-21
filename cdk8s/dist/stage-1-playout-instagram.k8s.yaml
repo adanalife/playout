@@ -2,48 +2,48 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   labels:
-    app: playout-youtube
-    app.kubernetes.io/instance: playout-youtube
+    app: playout-instagram
+    app.kubernetes.io/instance: playout-instagram
     app.kubernetes.io/name: playout
     app.kubernetes.io/part-of: tripbot
-  name: playout-youtube-config
+  name: playout-instagram-config
   namespace: stage-1
 data:
   VIDEO_DIR: /opt/data/Dashcam/_all
   OUTPUT: rtsp
   ENCODER: passthrough
-  RTSP_URL: rtsp://mediamtx-youtube:8554/dashcam
+  RTSP_URL: rtsp://mediamtx-instagram:8554/dashcam
   NATS_URL: nats://nats.stage-1-platform.svc.cluster.local:4222
   ENV: staging
-  STREAM_PLATFORM: youtube
+  STREAM_PLATFORM: instagram
   DEPLOYMENT_ENVIRONMENT: stage-1
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
-    app: playout-youtube
-    app.kubernetes.io/instance: playout-youtube
+    app: playout-instagram
+    app.kubernetes.io/instance: playout-instagram
     app.kubernetes.io/name: playout
     app.kubernetes.io/part-of: tripbot
-  name: playout-youtube
+  name: playout-instagram
   namespace: stage-1
 spec:
   replicas: 0
   selector:
     matchLabels:
-      app: playout-youtube
+      app: playout-instagram
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app: playout-youtube
+        app: playout-instagram
         app.kubernetes.io/name: playout
-        app.kubernetes.io/instance: playout-youtube
+        app.kubernetes.io/instance: playout-instagram
         app.kubernetes.io/part-of: tripbot
       annotations:
-        adanalife.dev/config-hash: 6260f684de
+        adanalife.dev/config-hash: 2bdb7192bf
     spec:
       securityContext:
         seccompProfile:
@@ -61,7 +61,7 @@ spec:
                 - ALL
           envFrom:
             - configMapRef:
-                name: playout-youtube-config
+                name: playout-instagram-config
             - secretRef:
                 name: sentry-playout
                 optional: true
@@ -102,15 +102,15 @@ apiVersion: v1
 kind: Service
 metadata:
   labels:
-    app: playout-youtube
-    app.kubernetes.io/instance: playout-youtube
+    app: playout-instagram
+    app.kubernetes.io/instance: playout-instagram
     app.kubernetes.io/name: playout
     app.kubernetes.io/part-of: tripbot
-  name: playout-youtube
+  name: playout-instagram
   namespace: stage-1
 spec:
   selector:
-    app: playout-youtube
+    app: playout-instagram
   ports:
     - name: http
       port: 8080

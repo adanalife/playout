@@ -20,6 +20,24 @@ def _versions() -> dict:
     return yaml.safe_load(_VERSIONS_FILE.read_text()) or {}
 
 
+# The fleet-wide supported-platform set, owned by platform-gateway (its Go
+# adapter registry is the source of truth) and synced into this repo's
+# platforms.json via `task platforms:sync`. Every env's `platforms` must be a
+# subset of it (validated below). Never hand-edit platforms.json — add an
+# adapter in the gateway + re-sync.
+_PLATFORMS_FILE = Path(__file__).resolve().parents[1] / "platforms.json"
+
+
+def _load_supported_platforms() -> tuple[str, ...]:
+    import json
+
+    with _PLATFORMS_FILE.open() as f:
+        return tuple(json.load(f)["platforms"])
+
+
+SUPPORTED_PLATFORMS = _load_supported_platforms()
+
+
 @dataclass(frozen=True)
 class EnvConfig:
     name: str
@@ -70,8 +88,10 @@ ENVS: dict[str, EnvConfig] = {
         # scale-up brings one live and sticks (Argo ignores .spec.replicas).
         # Only twitch feeds a live encoder today — youtube waits on the pending
         # YouTube Data API quota extension, facebook on a go-live. Parking frees
-        # the instance's CPU request on the minipc until scaled up.
-        platforms=("youtube", "twitch", "facebook"),
+        # the instance's CPU request on the minipc until scaled up. instagram/
+        # tiktok synthesize here too (born parked); they wait on the 9:16 vertical
+        # scene + stream keys before a console scale-up can bring them live.
+        platforms=SUPPORTED_PLATFORMS,
         image_tag="latest",  # overridden by the versions.yaml pin
         dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
         cpu_request="2",
@@ -87,11 +107,21 @@ ENVS: dict[str, EnvConfig] = {
         nats_env="staging",
         image_tag="main",
         # facebook is the active stage platform (feeds obs-facebook via the
-        # mediamtx-facebook relay); both births parked at replicas:0 and come
-        # live via a console scale-up.
-        platforms=("youtube", "facebook"),
+        # mediamtx-facebook relay); every platform births parked at replicas:0
+        # and comes live via a console scale-up.
+        platforms=SUPPORTED_PLATFORMS,
         # Same encode mode as prod so the stage soak transfers.
         cpu_request="2",
         encoder="passthrough",
     ),
 }
+
+
+# Guard: an env can only run platforms the gateway has an adapter for.
+for _name, _env in ENVS.items():
+    _unknown = tuple(p for p in _env.platforms if p not in SUPPORTED_PLATFORMS)
+    if _unknown:
+        raise ValueError(
+            f"{_name}: platforms {_unknown} not in SUPPORTED_PLATFORMS "
+            f"{SUPPORTED_PLATFORMS} — add an adapter in platform-gateway + run `task platforms:sync`"
+        )

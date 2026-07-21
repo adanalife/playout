@@ -164,22 +164,3 @@ spec:
     - name: http
       port: 8080
       targetPort: http
----
-apiVersion: external-secrets.io/v1
-kind: ExternalSecret
-metadata:
-  labels:
-    app.kubernetes.io/part-of: tripbot
-  name: sentry-playout
-  namespace: prod-1
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    name: aws-parameterstore
-    kind: SecretStore
-  target:
-    name: sentry-playout
-    creationPolicy: Owner
-  dataFrom:
-    - extract:
-        key: /k8s/sentry-playout
