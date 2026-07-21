@@ -33,15 +33,6 @@ class EnvConfig:
     # Platform instances to render.
     platforms: tuple[str, ...] = ("youtube",)
 
-    # Subset of `platforms` whose Deployment renders with spec.replicas=0 —
-    # present but parked, so bringing one up is a scale-up rather than a new
-    # manifest. Same knob as the tripbot/obs/gateway repos.
-    parked_platforms: tuple[str, ...] = ()
-
-    def replicas_for(self, platform: str) -> int:
-        """spec.replicas for a platform's Deployment: 0 when parked, else 1."""
-        return 0 if platform in self.parked_platforms else 1
-
     # Which PVC holds the dashcam corpus: the NFS-backed `vlc-dashcam` or the
     # node-local copy `vlc-dashcam-local` (same claims vlc-server mounts).
     dashcam_claim: str = "vlc-dashcam"
@@ -75,15 +66,12 @@ ENVS: dict[str, EnvConfig] = {
         name="prod-1",
         namespace="prod-1",
         nats_env="production",
+        # Every platform's playout births parked at replicas:0; a console
+        # scale-up brings one live and sticks (Argo ignores .spec.replicas).
+        # Only twitch feeds a live encoder today — youtube waits on the pending
+        # YouTube Data API quota extension, facebook on a go-live. Parking frees
+        # the instance's CPU request on the minipc until scaled up.
         platforms=("youtube", "twitch", "facebook"),
-        # playout-youtube is parked while the YouTube Data API quota extension
-        # is pending — the whole prod-youtube stack (tripbot/onscreens, the obs
-        # encoder) is staged, not live, so nothing consumes the youtube relay.
-        # playout-facebook is staged parked the same way: the prod obs-facebook /
-        # relay stack isn't live yet, so nothing consumes the facebook relay
-        # until the stack is unparked for a go-live.
-        # Parking frees the instance's CPU request on the minipc.
-        parked_platforms=("youtube", "facebook"),
         image_tag="latest",  # overridden by the versions.yaml pin
         dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
         cpu_request="2",
@@ -99,9 +87,9 @@ ENVS: dict[str, EnvConfig] = {
         nats_env="staging",
         image_tag="main",
         # facebook is the active stage platform (feeds obs-facebook via the
-        # mediamtx-facebook relay); youtube stays present but parked.
+        # mediamtx-facebook relay); both births parked at replicas:0 and come
+        # live via a console scale-up.
         platforms=("youtube", "facebook"),
-        parked_platforms=("youtube",),
         # Same encode mode as prod so the stage soak transfers.
         cpu_request="2",
         encoder="passthrough",

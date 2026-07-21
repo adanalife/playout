@@ -295,7 +295,10 @@ class PlayoutInstance(Construct):
             namespace=ns,
             labels=labels,
             spec={
-                "replicas": env.replicas_for(platform),
+                # Births parked; a console scale-up brings the platform live and
+                # Argo ignores .spec.replicas so the scale sticks (infra argocd
+                # ignore_replicas). Replica count is runtime-owned, not git-owned.
+                "replicas": 0,
                 "selector": {"matchLabels": {"app": name}},
                 # Recreate: two publishers racing on the same MediaMTX path
                 # would fight over it; one owner at a time.

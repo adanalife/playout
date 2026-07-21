@@ -29,7 +29,7 @@ metadata:
   name: playout-twitch
   namespace: prod-1
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: playout-twitch
