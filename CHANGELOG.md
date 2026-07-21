@@ -2,6 +2,12 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.14.0] — 2026-07-21
+
+### Changed
+
+- Playout Deployments now birth parked at `replicas: 0` for every platform and env — a platform comes online via the console's per-platform scale-up, which sticks because Argo ignores `.spec.replicas`. Replaces the `parked_platforms` cdk8s knob (replica count is now runtime-owned). ([#78](https://github.com/adanalife/playout/pull/78))
+
 ## [v0.13.1] — 2026-07-20
 
 ### Fixed
