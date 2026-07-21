@@ -26,7 +26,7 @@ jobs:
       # script dir is always on PATH. The explicit python-version matters:
       # without it setup-python installs nothing and defers to the python
       # already on PATH — mise's again.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       # no-commit-to-branch guards local commits; in CI the checkout is the
