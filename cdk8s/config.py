@@ -88,8 +88,10 @@ ENVS: dict[str, EnvConfig] = {
         # scale-up brings one live and sticks (Argo ignores .spec.replicas).
         # Only twitch feeds a live encoder today — youtube waits on the pending
         # YouTube Data API quota extension, facebook on a go-live. Parking frees
-        # the instance's CPU request on the minipc until scaled up.
-        platforms=("youtube", "twitch", "facebook"),
+        # the instance's CPU request on the minipc until scaled up. instagram/
+        # tiktok synthesize here too (born parked); they wait on the 9:16 vertical
+        # scene + stream keys before a console scale-up can bring them live.
+        platforms=SUPPORTED_PLATFORMS,
         image_tag="latest",  # overridden by the versions.yaml pin
         dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
         cpu_request="2",
@@ -105,9 +107,9 @@ ENVS: dict[str, EnvConfig] = {
         nats_env="staging",
         image_tag="main",
         # facebook is the active stage platform (feeds obs-facebook via the
-        # mediamtx-facebook relay); both births parked at replicas:0 and come
-        # live via a console scale-up.
-        platforms=("youtube", "facebook"),
+        # mediamtx-facebook relay); every platform births parked at replicas:0
+        # and comes live via a console scale-up.
+        platforms=SUPPORTED_PLATFORMS,
         # Same encode mode as prod so the stage soak transfers.
         cpu_request="2",
         encoder="passthrough",
