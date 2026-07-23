@@ -58,7 +58,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v8.2.0 # no floating major tag published
         if: ${{ steps.release.outputs.pr && !steps.release.outputs.release_created }}
 
       - name: Build changelog on the release PR branch
