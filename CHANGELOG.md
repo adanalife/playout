@@ -2,6 +2,16 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.15.1] — 2026-07-23
+
+### Fixed
+
+- Choose the output sink from MediaMTX relay reachability at startup: publish over RTSP when the relay is up, else run a fakesink so the pipeline still plays and the console map keeps advancing off the NATS playhead. Fixes the crash-loop when a platform is in chat-map mode (relay parked), and a lightweight monitor restarts to reconfigure when the relay comes or goes. ([#91](https://github.com/adanalife/playout/pull/91))
+
+### CI / Tooling
+
+- Harden shared CI workflows: scope token permissions, pin super-linter and setup-uv. ([#90](https://github.com/adanalife/playout/pull/90))
+
 ## [v0.15.0] — 2026-07-21
 
 ### Changed
