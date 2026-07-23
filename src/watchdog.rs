@@ -18,19 +18,41 @@ const INTERVAL: Duration = Duration::from_secs(30);
 const INITIAL_DELAY: Duration = Duration::from_secs(30);
 const FAILURE_THRESHOLD: u32 = 3;
 
-/// One RTSP DESCRIBE against `url`, ok iff the server answers 200. MediaMTX
-/// only DESCRIBEs a path OK while it has a live publisher, so a 404/5xx here
-/// means our publish is gone even if the TCP port still accepts.
-async fn describe(url: &str) -> Result<()> {
+/// host:port to dial for an rtsp:// url, defaulting to the RTSP port when the
+/// url omits one. Shared by the DESCRIBE probe and the plain reachability check.
+fn relay_addr(url: &str) -> Result<String> {
     let authority = url
         .strip_prefix("rtsp://")
         .with_context(|| format!("not an rtsp:// url: {url}"))?;
     let (hostport, _) = authority.split_once('/').unwrap_or((authority, ""));
-    let addr = if hostport.contains(':') {
+    Ok(if hostport.contains(':') {
         hostport.to_string()
     } else {
         format!("{hostport}:554")
+    })
+}
+
+/// Is the MediaMTX relay listening? A plain TCP connect to the publish
+/// endpoint, bounded by `PROBE_TIMEOUT`. Unlike `describe`, this sends no RTSP
+/// request — MediaMTX DESCRIBEs a path 404 until a publisher attaches, so
+/// *before* we publish, "the port accepts a connection" is the honest signal
+/// that the relay pod is up. A parked relay (its Deployment scaled to 0) has no
+/// Service endpoints, so the connect is refused or times out.
+pub async fn relay_up(rtsp_url: &str) -> bool {
+    let Ok(addr) = relay_addr(rtsp_url) else {
+        return false;
     };
+    matches!(
+        tokio::time::timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect(&addr)).await,
+        Ok(Ok(_))
+    )
+}
+
+/// One RTSP DESCRIBE against `url`, ok iff the server answers 200. MediaMTX
+/// only DESCRIBEs a path OK while it has a live publisher, so a 404/5xx here
+/// means our publish is gone even if the TCP port still accepts.
+async fn describe(url: &str) -> Result<()> {
+    let addr = relay_addr(url)?;
 
     let probe = async {
         let mut conn = tokio::net::TcpStream::connect(&addr)
@@ -103,10 +125,59 @@ pub async fn run(rtsp_url: String, on_dead: impl Fn() + Send + 'static) {
     }
 }
 
+/// The map-only counterpart to `run`: playout built a no-broadcast pipeline
+/// because the relay was parked, so watch for it coming back and, when it does,
+/// invoke `on_up` (a clean exit) so the restart rebuilds with the RTSP publish
+/// wired in. Probes on the same `INTERVAL`; a single successful connect is
+/// enough — a listening relay is unambiguous, and the publish path's own errors
+/// guard the reverse direction.
+pub async fn run_reappear(rtsp_url: String, on_up: impl Fn() + Send + 'static) {
+    info!(
+        url = %rtsp_url,
+        interval_s = INTERVAL.as_secs(),
+        "watching for the relay to return (map-only mode)"
+    );
+    loop {
+        tokio::time::sleep(INTERVAL).await;
+        if relay_up(&rtsp_url).await {
+            info!("relay is back; restarting to resume broadcast");
+            on_up();
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn relay_addr_defaults_port_and_keeps_explicit() {
+        assert_eq!(
+            relay_addr("rtsp://mediamtx-facebook:8554/dashcam").unwrap(),
+            "mediamtx-facebook:8554"
+        );
+        // No port in the authority → the RTSP default.
+        assert_eq!(relay_addr("rtsp://host/dashcam").unwrap(), "host:554");
+        // No path at all.
+        assert_eq!(relay_addr("rtsp://host:8554").unwrap(), "host:8554");
+        assert!(relay_addr("http://host/dashcam").is_err());
+    }
+
+    #[tokio::test]
+    async fn relay_up_true_when_listening_false_when_not() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert!(relay_up(&format!("rtsp://{addr}/dashcam")).await);
+
+        // Drop the listener, then a fresh bind gives us a port nothing answers.
+        drop(listener);
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+        assert!(!relay_up(&format!("rtsp://{dead_addr}/dashcam")).await);
+    }
 
     async fn serve_one(status: &'static str) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

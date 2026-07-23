@@ -110,6 +110,20 @@ fn make_window_branch() -> Result<Vec<gst::Element>> {
     Ok(vec![queue, convert, sink])
 }
 
+/// Map-only sink: swallow the stream at real time and broadcast nothing. Used
+/// in place of the RTSP publish when the MediaMTX relay is parked (the console's
+/// chat-map mode scales the relay to 0 without restarting playout). `sync=true`
+/// paces the sink to the buffer clock, so the pipeline still reaches PLAYING and
+/// advances the running-time the NATS playhead reports — which is what drives
+/// the console map — while nothing leaves the pod. fakesink is format-agnostic,
+/// so it takes the passthrough H.264 or the decoded path equally.
+fn make_fakesink_branch() -> Result<Vec<gst::Element>> {
+    let queue = gst::ElementFactory::make("queue").build()?;
+    let sink = gst::ElementFactory::make("fakesink").build()?;
+    sink.set_property("sync", true);
+    Ok(vec![queue, sink])
+}
+
 /// One output frame is a "gap" when its timestamp lands more than
 /// `threshold_ns` after the previous frame's — a visible stall or drop. The
 /// caller feeds DTS (monotonic in decode order), so a jump means a late frame,
@@ -255,9 +269,24 @@ async fn run() -> Result<()> {
         ])?;
     }
 
+    // With an RTSP OUTPUT the sink we wire depends on whether the MediaMTX relay
+    // is actually up. In dark/live the relay is scaled up and we publish (the
+    // broadcast path). In chat-map the relay is parked — the console scales it
+    // to 0 without restarting playout — so publishing would fail the pipeline;
+    // instead we run a fakesink, keeping the pipeline playing so the console map
+    // still advances off the NATS playhead. The relay-state monitor below
+    // restarts us to reconfigure when that reachability flips either way.
+    let publish = output == "rtsp" || output == "both";
+    let broadcasting = publish && watchdog::relay_up(&rtsp_url).await;
+
     let mut branches = Vec::new();
-    if output == "rtsp" || output == "both" {
-        branches.push(make_encode_branch(&encoder_name, &rtsp_url)?);
+    if publish {
+        if broadcasting {
+            branches.push(make_encode_branch(&encoder_name, &rtsp_url)?);
+        } else {
+            info!(rtsp_url = %rtsp_url, "relay unreachable; running map-only (no broadcast)");
+            branches.push(make_fakesink_branch()?);
+        }
     }
     if output == "window" || output == "both" {
         branches.push(make_window_branch()?);
@@ -340,6 +369,9 @@ async fn run() -> Result<()> {
     });
 
     let failed = Arc::new(AtomicBool::new(false));
+    // Set by the map-only relay-return monitor: signals a clean exit (0) so k8s
+    // restarts us into the broadcast configuration, distinct from `failed`.
+    let reconfigure = Arc::new(AtomicBool::new(false));
     let loop_clone = main_loop.clone();
     let failed_clone = failed.clone();
     let player_bus = Arc::clone(&player);
@@ -378,13 +410,26 @@ async fn run() -> Result<()> {
         glib::ControlFlow::Continue
     })?;
 
-    // Watchdog only when we actually publish (not the window-only local mode).
-    if output != "window" {
+    // Relay-state guards, live only for an RTSP OUTPUT:
+    // - broadcasting: the DESCRIBE watchdog exits non-zero if the publish dies,
+    //   so k8s restarts us — and if the relay stays down we come back up
+    //   map-only rather than crash-looping.
+    // - map-only: watch for the relay returning and exit cleanly to rebuild
+    //   with the publish wired in.
+    // The window-only local mode has no relay to watch.
+    if broadcasting {
         let wd_failed = failed.clone();
         let wd_loop = main_loop.clone();
         tokio::spawn(watchdog::run(rtsp_url.clone(), move || {
             wd_failed.store(true, Ordering::SeqCst);
             wd_loop.quit();
+        }));
+    } else if publish {
+        let rc = reconfigure.clone();
+        let rc_loop = main_loop.clone();
+        tokio::spawn(watchdog::run_reappear(rtsp_url.clone(), move || {
+            rc.store(true, Ordering::SeqCst);
+            rc_loop.quit();
         }));
     }
 
@@ -397,6 +442,10 @@ async fn run() -> Result<()> {
         let _ = provider.shutdown();
     }
 
+    if reconfigure.load(Ordering::SeqCst) {
+        info!("relay returned; exiting cleanly to restart in broadcast mode");
+        return Ok(());
+    }
     if failed.load(Ordering::SeqCst) {
         bail!("pipeline failed");
     }
