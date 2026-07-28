@@ -8,11 +8,8 @@ name: platforms-contract
 #
 # The daily schedule is the point of this workflow: gateway-side drift lands
 # with no PR here to notice it. The PR-time check is a step of the `gates` job
-# in pr-gates.yml.
+# in pr-gates.yml, which covers every merge — so there's no push trigger here.
 on:
-  push:
-    branches:
-      - main
   schedule:
     - cron: '17 13 * * *'
   workflow_dispatch:
