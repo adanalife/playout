@@ -14,30 +14,51 @@ from the previous clip). This server removes both failure modes structurally:
 - clips are **decoded**, normalized, and fed through **one long-lived
   encoder** — inputs swap in front of it, so the output is a single unbroken
   H.264 stream with no per-clip EOF and no stale-reference corruption.
+- `ENCODER=passthrough` skips decode and encode entirely: the airing corpus is
+  transcoded to one uniform spec (identical params, IDR-leading closed GOPs),
+  which is what makes splicing the compressed streams safe, and `h264parse`
+  re-sends SPS/PPS at every IDR so each splice and every late joiner resyncs.
+  Stage and prod both run this — x264 can't hold 1080p60 realtime on the minipc.
 
 ## Architecture
 
 Rust on [gstreamer-rs](https://gitlab.freedesktop.org/gstreamer/gstreamer-rs).
 
 ```text
-playlist manager
-  → uridecodebin3 (gapless input swaps)
-  → videoconvert ! videoscale ! videorate ! capsfilter (1920×1080 @ 60fps)
+playlist manager (active clip + prerolled next)
+  → uridecodebin3 per clip (gapless input swaps)
+  → concat (rewrites segments so running time never resets across boundaries)
+  → decode path only: videoconvert ! videoscale ! videorate ! capsfilter
+                      (1920×1080 @ 60fps)
   → tee
-      ├─ encode: x264enc / vah264enc → h264parse → rtspclientsink → MediaMTX
-      └─ window (optional local preview): queue → autovideosink
+      ├─ encode:   [x264enc / vah264enc →] h264parse → rtspclientsink → MediaMTX
+      ├─ map-only: fakesink, when the MediaMTX relay is parked — the pipeline
+      │            keeps playing so the console map still advances
+      └─ window:   queue → autovideosink (optional local preview)
 ```
 
 [MediaMTX](https://github.com/bluenviron/mediamtx) sits between playout and
 its consumers so the OBS-facing RTSP endpoint survives playout restarts, and
 off-cluster viewers get TCP transport.
 
-## Status
+## Control plane
 
-Early. Current scope is the gapless media pipeline; the control plane
-(NATS playback commands, `/vlc/current`, resume cache, health probes,
-metrics) ports over next, wire-compatible with vlc-server so nothing
-upstream changes at cutover.
+- **NATS commands** on `tripbot.<env>.vlc.<verb>.<platform>` (fire-and-forget):
+  `play.random`, `play.file`, `play.at`, `skip`, `back`, `seek`. The platform
+  leaf keeps instances isolated — a Twitch-triggered skip can't advance the
+  YouTube stream. tripbot's `playout-client` is the publisher.
+- **Resume**: the active clip + position are republished every 5s to the
+  `TRIPBOT_VLC_LASTPLAYED` JetStream last-value cache, which a restarting
+  instance reads to pick up where it left off. NATS being down degrades to
+  looping the corpus uncommanded, never to no stream.
+- **HTTP** on `:8080`: `/health/live`, `/health/ready` (ready = pipeline
+  PLAYING), `/version`, `/vlc/current` (bare basename of the active clip),
+  `/debug/pipeline` (live topology as Graphviz).
+- **Metrics**: OTLP push to Grafana Cloud, gated on
+  `OTEL_EXPORTER_OTLP_ENDPOINT` so local runs export nothing.
+- **Watchdog**: an RTSP DESCRIBE probe every 30s, since `rtspclientsink` in
+  RECORD mode reports PLAYING without proving data flow. Three consecutive
+  failures exit non-zero for a k8s restart.
 
 ## Local development
 

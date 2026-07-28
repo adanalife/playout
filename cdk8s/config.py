@@ -44,14 +44,14 @@ class EnvConfig:
     image_tag: str  # floating tag (main) for components without a pin
 
     # tripbot env token in the NATS command subjects (tripbot.<nats_env>.vlc.*),
-    # matching what vlc-server and cmd/tripbot use — NOT the k8s env name.
+    # matching what cmd/tripbot publishes — NOT the k8s env name.
     nats_env: str = "development"
 
     # Platform instances to render.
     platforms: tuple[str, ...] = ("youtube",)
 
     # Which PVC holds the dashcam corpus: the NFS-backed `vlc-dashcam` or the
-    # node-local copy `vlc-dashcam-local` (same claims vlc-server mounts).
+    # node-local copy `vlc-dashcam-local`.
     dashcam_claim: str = "vlc-dashcam"
 
     # x264enc | vah264enc (VAAPI — needs gpu) | passthrough (stream-copy;
@@ -83,13 +83,10 @@ ENVS: dict[str, EnvConfig] = {
         name="prod-1",
         namespace="prod-1",
         nats_env="production",
-        # Every platform's playout births parked at replicas:0; a console
-        # scale-up brings one live and sticks (Argo ignores .spec.replicas).
-        # Only twitch feeds a live encoder today — youtube waits on the pending
-        # YouTube Data API quota extension, facebook on a go-live. Parking frees
-        # the instance's CPU request on the minipc until scaled up. instagram/
-        # tiktok synthesize here too (born parked); they wait on the 9:16 vertical
-        # scene + stream keys before a console scale-up can bring them live.
+        # Every supported platform synthesizes an instance, born parked at
+        # replicas:0; a console scale-up brings one live and sticks (Argo ignores
+        # .spec.replicas, so which platforms are live is runtime state, not
+        # git state). Parking frees the instance's CPU request on the minipc.
         platforms=SUPPORTED_PLATFORMS,
         image_tag="latest",  # overridden by the versions.yaml pin
         dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
@@ -105,9 +102,8 @@ ENVS: dict[str, EnvConfig] = {
         namespace="stage-1",
         nats_env="staging",
         image_tag="main",
-        # facebook is the active stage platform (feeds obs-facebook via the
-        # mediamtx-facebook relay); every platform births parked at replicas:0
-        # and comes live via a console scale-up.
+        # Same as prod: one instance per supported platform, born parked, brought
+        # live by a console scale-up.
         platforms=SUPPORTED_PLATFORMS,
         # Same encode mode as prod so the stage soak transfers.
         cpu_request="2",

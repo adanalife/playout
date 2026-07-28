@@ -40,10 +40,10 @@ fn env_or(key: &str, default: &str) -> String {
 }
 
 /// Recursively collect the `.mp4` files (case-insensitive) under `dir`,
-/// sorted by full path. vlc-server walks recursively too — today's corpus is
-/// flat, but the scan must not silently miss a subdir the day one appears.
-/// An empty corpus is a deployment fault: bail loudly and let the pod
-/// crash-loop rather than publish a dead stream.
+/// sorted by full path. Today's corpus is flat, but the scan must not
+/// silently miss a subdir the day one appears. An empty corpus is a
+/// deployment fault: bail loudly and let the pod crash-loop rather than
+/// publish a dead stream.
 fn scan_video_dir(dir: &str) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut dirs = vec![PathBuf::from(dir)];
@@ -320,8 +320,8 @@ async fn run() -> Result<()> {
     };
 
     // Active clip + prerolled next; every EOS tops the pair back up.
-    // Cold boot (no resume state) starts on a random clip, like vlc-server —
-    // otherwise every clean deploy replays the same first clip on stream.
+    // Cold boot (no resume state) starts on a random clip; otherwise every
+    // clean deploy replays the same first clip on stream.
     let (first, offset) = resume.unwrap_or_else(|| (player.random_index(), 0));
     player.spawn(first, offset);
     player.spawn((first + 1) % player.files.len(), 0);

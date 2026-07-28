@@ -13,7 +13,6 @@ async fn live() -> impl IntoResponse {
 
 /// Ready only while the pipeline is PLAYING; 503 with the reason otherwise,
 /// so k8s readiness probes pull the pod out of rotation while it recovers.
-/// Same wire contract as vlc-server's /health/ready.
 async fn ready(State(player): State<SharedPlayer>) -> impl IntoResponse {
     ready_response(player.pipeline.current_state())
 }
@@ -43,8 +42,8 @@ async fn version() -> impl IntoResponse {
     axum::Json(version_json())
 }
 
-/// Wire-compatible with vlc-server: plain-text basename of the current clip
-/// (what tripbot's vlc-client reads verbatim), empty string when idle.
+/// Plain-text basename of the current clip — read verbatim by tripbot's
+/// playout-client, so no path, no trailing newline. Empty string when idle.
 async fn current(State(player): State<SharedPlayer>) -> String {
     player.current_basename().unwrap_or_default()
 }

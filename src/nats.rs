@@ -1,8 +1,9 @@
-//! Control plane, wire-compatible with tripbot's libvlc vlc-server so nothing
-//! upstream changes at cutover. Commands arrive over **core NATS** (fire-and-
-//! forget, `tripbot.<env>.vlc.<verb>.<platform>`); the currently-playing clip and playback
-//! position flow back through the `TRIPBOT_VLC_LASTPLAYED` JetStream last-value
-//! cache, which a restarted instance reads to resume where it left off.
+//! Control plane. Commands arrive over **core NATS** (fire-and-forget,
+//! `tripbot.<env>.vlc.<verb>.<platform>`); the currently-playing clip and
+//! playback position flow back through the `TRIPBOT_VLC_LASTPLAYED` JetStream
+//! last-value cache, which a restarted instance reads to resume where it left
+//! off. The `vlc` subject token and stream name are the wire contract tripbot's
+//! playout-client speaks — the names outlived the libvlc server they came from.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +17,7 @@ use tracing::{info, warn};
 
 use crate::SharedPlayer;
 
-/// JetStream stream vlc-server declares for the lastplayed last-value cache.
+/// JetStream stream backing the lastplayed last-value cache.
 const LASTPLAYED_STREAM: &str = "TRIPBOT_VLC_LASTPLAYED";
 
 fn subject(env: &str, verb: &str) -> String {
@@ -66,11 +67,11 @@ pub struct Control {
 /// on a non-retryable config error; a server that's merely unreachable yields a
 /// client that keeps dialing in the background (`retry_on_initial_connect`).
 ///
-/// That retry is the fix for the boot-race — a node reboot bringing NATS up
-/// alongside playout — that used to leave the control plane permanently dead:
-/// the command subscriptions queue client-side and flush the moment NATS
-/// answers, and `playout_nats_connected` tracks the live state via the event
-/// callback so the gap is visible on the dashboard.
+/// That retry covers the boot-race where a node reboot brings NATS up alongside
+/// playout — without it the control plane stays dead for the life of the
+/// process. The command subscriptions queue client-side and flush the moment
+/// NATS answers, and `playout_nats_connected` tracks the live state via the
+/// event callback so the gap is visible on the dashboard.
 pub async fn connect(env: String, platform: String, url: String) -> Option<Control> {
     let client = match async_nats::ConnectOptions::new()
         .retry_on_initial_connect()
@@ -106,9 +107,9 @@ pub async fn connect(env: String, platform: String, url: String) -> Option<Contr
     wait_for_connect(&client, Duration::from_secs(10)).await;
 
     let js = jetstream::new(client.clone());
-    // Idempotent: vlc-server may already have declared this with the same
-    // config. A mismatch just logs — the stream still exists, so publishes to
-    // its subject are captured either way.
+    // Idempotent: the stream outlives any single instance, so most boots find
+    // it already declared. A config mismatch just logs — the stream still
+    // exists, so publishes to its subject are captured either way.
     let cfg = jetstream::stream::Config {
         name: LASTPLAYED_STREAM.to_string(),
         subjects: vec![format!("{}.*", subject(&env, "lastplayed"))],
@@ -230,7 +231,7 @@ impl Control {
 
     /// Republish the current clip + position every `interval` so the last-value
     /// cache tracks where playback is. Worst case a restart resumes one
-    /// interval behind — matching vlc-server's ticker.
+    /// interval behind.
     pub async fn run_ticker(self: Arc<Self>, player: SharedPlayer, interval: Duration) {
         let subj = self.lastplayed_subject();
         let mut tick = tokio::time::interval(interval);
@@ -239,8 +240,8 @@ impl Control {
             let Some((file, position_ms)) = player.playhead() else {
                 continue;
             };
-            // emitted_at is a debug-only latency field on vlc-server's side and
-            // unused on resume; leave it empty rather than pull in a time-format
+            // emitted_at is a debug-only latency field in the payload contract,
+            // unread on resume; leave it empty rather than pull in a time-format
             // dependency just to stamp it.
             let payload = serde_json::json!({
                 "emitted_at": "",

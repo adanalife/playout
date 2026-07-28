@@ -3,9 +3,9 @@
 //! unset (local runs, or the ESO secret not yet synced), like the Go fleet.
 //!
 //! Signals: a 5s recorder samples the playhead and pipeline running time
-//! (running time ≈ wallclock is the realtime-health check the soaks used),
-//! a tee-sink pad probe counts output frames and PTS gaps (true output fps
-//! and visible-stall detection), and counters track clip spawns (every
+//! (running time ≈ wallclock is the realtime-health check), a tee-sink pad
+//! probe counts output frames and timestamp gaps (true output fps and
+//! visible-stall detection), and counters track clip spawns (every
 //! boundary or redirect), clip errors, and NATS commands by verb. ponytail:
 //! no per-boundary drift histogram yet — the spawn log lines carry what
 //! drift analysis needs; add one if dashboards outgrow log-based analysis.
