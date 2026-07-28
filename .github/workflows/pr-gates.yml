@@ -10,16 +10,16 @@
 # hang as "Expected" and block merges instead. Expensive steps stay cheap by
 # checking the PR's changed paths first.
 #
-# Deliberately NOT folded in: changelog-number.yml, which needs `contents:
-# write` to push the fragment rename. Job-level permissions apply to every step,
-# so merging it would put a write token in scope for all the read-only gates.
+# changelog-number.yml stays a separate workflow: it needs `contents: write` to
+# push the fragment rename, and job-level permissions apply to every step, so
+# folding it in here would put a write token in scope for the read-only gates.
 name: pr-gates
 
 on:
   pull_request:
     branches: [main]
-    # Union of the triggers the individual gates needed: `edited` for the title
-    # check, `labeled`/`unlabeled` for the skip-changelog escape hatch.
+    # `edited` for the title check, `labeled`/`unlabeled` for the
+    # skip-changelog escape hatch.
     types: [opened, edited, reopened, synchronize, labeled, unlabeled]
 
 permissions:

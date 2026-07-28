@@ -5,7 +5,7 @@
 playout publishes its stream INTO the per-platform MediaMTX relay (authored
 in infra); the Service exposes only the HTTP control surface on :8080
 (/vlc/current for tripbot/console reads, health probes, /version) — the
-same name tripbot's `VLC_SERVER_HOST` points at after cutover.
+name tripbot's `VLC_SERVER_HOST` points at.
 
 Everything is cdk8s.ApiObject with literal specs — the same idiom as the obs
 repo, platform-gateway, and tripbot-console.
@@ -30,8 +30,7 @@ HTTP_PORT = 8080  # the binary's HTTP_PORT default
 # doesn't apply to a runtime cluster pull.
 CRANE_IMAGE = "gcr.io/go-containerregistry/crane:v0.21.7"
 
-# Must match the path baked into the corpus PVs (vlc-server mounts the same
-# claims at the same path).
+# Must match the path baked into the corpus PVs.
 DASHCAM_MOUNT = "/opt/data/Dashcam/_all"
 
 # SM container holding playout's Sentry DSN, JSON shape {"SENTRY_DSN": "…"}.
@@ -182,8 +181,8 @@ class PlayoutInstance(Construct):
             # OBS reads from MediaMTX, so playout restarts never invalidate
             # the OBS-facing endpoint.
             "RTSP_URL": f"rtsp://mediamtx-{platform}:8554/dashcam",
-            # Control plane: NATS commands + lastplayed resume, wire-compatible
-            # with vlc-server. NATS runs in the <env>-platform namespace.
+            # Control plane: NATS commands + lastplayed resume. NATS runs in the
+            # <env>-platform namespace.
             "NATS_URL": f"nats://nats.{env.name}-platform.svc.cluster.local:4222",
             "ENV": env.nats_env,
             "STREAM_PLATFORM": platform,
@@ -212,11 +211,11 @@ class PlayoutInstance(Construct):
         # The CPU request is the CFS weight under contention — the minipc
         # co-tenants two OBS encoders and the batch pipeline, so prod sizes
         # this for real.
-        # Memory: full decode → scale/rate → x264 encode of two concurrent
-        # 1080p60 clips (active + prerolled next) — nothing like libvlc's
-        # stream-copy vlc-server. 1Gi OOM-killed during preroll on the real
-        # corpus. ponytail: 4Gi ceiling is provisional; tune down once steady
-        # RSS is measured on stage.
+        # Memory sizes for the worst case the encoder knob allows: full decode →
+        # scale/rate → x264 encode of two concurrent 1080p60 clips (active +
+        # prerolled next). 1Gi OOM-killed during preroll on the real corpus.
+        # ponytail: 4Gi ceiling is provisional; tune down once steady RSS is
+        # measured on stage.
         requests: dict[str, str] = {"cpu": env.cpu_request, "memory": "512Mi"}
         limits: dict[str, str] = {"memory": "4Gi"}
         if env.gpu:
@@ -268,9 +267,8 @@ class PlayoutInstance(Construct):
 
         pod_spec: dict = {
             "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
-            # Pin to the minipc: the rpi5's four cores are fully spent on OBS
-            # compositing, and prod's node-local corpus PVC lives there anyway.
-            # (The i915 claim used to enforce this as a side effect.)
+            # Pin to the minipc: it is the cluster's only amd64 node, it holds
+            # prod's node-local corpus PVC, and VAAPI encode needs its iGPU.
             "nodeSelector": {"kubernetes.io/arch": "amd64"},
             "containers": [container],
             "volumes": [
@@ -324,7 +322,7 @@ class PlayoutInstance(Construct):
                 image_ref=image_ref,
             )
 
-        # The control-plane surface tripbot/console dial after cutover
+        # The control-plane surface tripbot/console dial
         # (VLC_SERVER_HOST=playout-<platform>). Stream data never transits
         # this Service — that path is playout → MediaMTX over RTSP.
         _obj(

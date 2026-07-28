@@ -1,7 +1,7 @@
 //! RTSP publish watchdog: DESCRIBE-probe the MediaMTX path we publish to and
-//! die loudly when it stops answering — vlc-server parity. The pipeline can
-//! sit in PLAYING with a dead publish (rtspclientsink in RECORD mode never
-//! proves data flow), so /health/ready alone misses exactly this failure.
+//! die loudly when it stops answering. The pipeline can sit in PLAYING with a
+//! dead publish (rtspclientsink in RECORD mode never proves data flow), so
+//! /health/ready alone misses exactly this failure.
 //! Exit non-zero and let k8s restart the pod; resume comes from JetStream.
 
 use anyhow::{Context, Result, bail};

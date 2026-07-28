@@ -355,9 +355,9 @@ fn clip_after(name: &str, steps: usize) -> &'static str {
 
 // ---------------------------------------------------------------------------
 
-/// Parity test 1: cold boot publishes to MediaMTX and `/vlc/current` serves a
-/// corpus basename byte-exact (no trailing newline, no path — tripbot's
-/// poller parses the body verbatim).
+/// Cold boot publishes to MediaMTX and `/vlc/current` serves a corpus
+/// basename byte-exact (no trailing newline, no path — tripbot's poller
+/// parses the body verbatim).
 #[tokio::test]
 async fn cold_boot_publishes_and_serves_current() {
     serial_or_skip!();
@@ -390,9 +390,9 @@ async fn cold_boot_publishes_and_serves_current() {
     );
 }
 
-/// Parity test 2: resume from a pre-seeded lastplayed message — the exact
-/// scenario that wedged 0.4.0 in prod. Plus the tail-guard and missing-file
-/// fallthrough variants.
+/// Resume from a pre-seeded lastplayed message — the exact scenario that
+/// wedged 0.4.0 in prod. Plus the tail-guard and missing-file fallthrough
+/// variants.
 #[tokio::test]
 async fn resume_from_preseeded_lastplayed() {
     serial_or_skip!();
@@ -434,8 +434,8 @@ async fn resume_from_preseeded_lastplayed() {
     }
 }
 
-/// Parity test 3: each command verb on its real leafed subject changes
-/// playback; the other platform's leaf is ignored; edge payloads behave.
+/// Each command verb on its real leafed subject changes playback; the other
+/// platform's leaf is ignored; edge payloads behave.
 #[tokio::test]
 async fn commands_act_and_other_platform_is_isolated() {
     serial_or_skip!();
@@ -500,9 +500,9 @@ async fn commands_act_and_other_platform_is_isolated() {
     wait_current(p.http, "seek backward target", |c| c == "clip_a.mp4");
 }
 
-/// Parity test 4: natural boundaries advance through the playlist and wrap —
-/// with 2s clips, every corpus member shows up inside a couple of cycles no
-/// matter which clip the cold boot picked.
+/// Natural boundaries advance through the playlist and wrap — with 2s clips,
+/// every corpus member shows up inside a couple of cycles no matter which clip
+/// the cold boot picked.
 #[tokio::test]
 async fn boundaries_advance_and_wrap() {
     serial_or_skip!();
@@ -525,9 +525,8 @@ async fn boundaries_advance_and_wrap() {
     );
 }
 
-/// Parity test 5: a corrupt clip mid-corpus must not take the pipeline down —
-/// the failed clip bin is torn down and playback rolls past it, like
-/// vlc-server does with bad files.
+/// A corrupt clip mid-corpus must not take the pipeline down: the failed
+/// clip bin is torn down and playback rolls past it.
 #[tokio::test]
 async fn corrupt_clip_is_skipped() {
     serial_or_skip!();
@@ -581,8 +580,8 @@ async fn resume_into_corrupt_clip_recovers() {
     assert!(CLIPS.contains(&cur.as_str()), "landed on {cur:?}");
 }
 
-/// Parity test 6: the lastplayed ticker keeps the JetStream last-value cache
-/// advancing while playing.
+/// The lastplayed ticker keeps the JetStream last-value cache advancing while
+/// playing.
 #[tokio::test]
 async fn lastplayed_ticker_advances() {
     serial_or_skip!();
@@ -616,9 +615,9 @@ async fn lastplayed_ticker_advances() {
     }
 }
 
-/// Passthrough 1: ENCODER=passthrough splices the compressed corpus straight
-/// to MediaMTX — no decode, no encode. Cold boot publishes, and natural
-/// boundaries (the compressed-splice path) advance through every clip.
+/// ENCODER=passthrough splices the compressed corpus straight to MediaMTX —
+/// no decode, no encode. Cold boot publishes, and natural boundaries (the
+/// compressed-splice path) advance through every clip.
 #[tokio::test]
 async fn passthrough_publishes_and_splices_boundaries() {
     serial_or_skip!();
@@ -646,7 +645,7 @@ async fn passthrough_publishes_and_splices_boundaries() {
     );
 }
 
-/// Passthrough 2: resume seeks a compressed clip via keyframe snapping.
+/// Passthrough resume seeks a compressed clip via keyframe snapping.
 /// Resuming a 20s clip at 10s means its successor appears ~10s in; a
 /// silently-demoted seek (from the top) wouldn't hit that boundary until
 /// 20s — so the successor inside 16s proves the KEY_UNIT seek took.
@@ -668,8 +667,7 @@ async fn passthrough_resume_seeks_to_keyframe() {
     );
 }
 
-/// Parity test 7: SIGTERM exits zero after a clean teardown (shipped in #20;
-/// this keeps it true).
+/// SIGTERM exits zero after a clean teardown.
 #[tokio::test]
 async fn sigterm_exits_clean() {
     serial_or_skip!();

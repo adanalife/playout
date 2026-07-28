@@ -167,7 +167,7 @@ fn budgeted_durations<'a>(
 
 /// Keeps a resume/play.at seek from landing in a clip's last moments — the
 /// clip would EOS almost immediately after the splice. An unknown duration
-/// errs toward seeking (matches vlc-server's tail guard).
+/// errs toward seeking.
 const SEEK_TAIL_GUARD_MS: i64 = 2000;
 
 fn should_seek_to(offset_ms: i64, duration_ms: Option<i64>) -> bool {
@@ -373,8 +373,7 @@ impl Player {
         let duration_ms = decode
             .query_duration::<gst::ClockTime>()
             .map(|d| d.mseconds() as i64);
-        // Tail guard and refusal both fall back to top-of-clip, like
-        // vlc-server.
+        // Tail guard and refusal both fall back to top-of-clip.
         if !should_seek_to(offset_ms, duration_ms) {
             info!(offset_ms, "seek lands at the clip tail; starting at top");
             offset_ms = 0;
@@ -435,11 +434,10 @@ impl Player {
     }
 
     /// A clip bin posted an error (corrupt file, or caps that won't negotiate
-    /// under passthrough): the per-clip analogue of vlc-server rolling past a
-    /// bad file. Tear the failed bin down and splice in the clip after it, so
-    /// a garbage `.mp4` mid-corpus — or a resume that lands on one — costs one
-    /// clip, not the pipeline. Returns false when the error is not a clip's
-    /// to absorb: encoder, sink, and pipeline errors stay fatal.
+    /// under passthrough): tear the failed bin down and splice in the clip
+    /// after it, so a garbage `.mp4` mid-corpus — or a resume that lands on one
+    /// — costs one clip, not the pipeline. Returns false when the error is not
+    /// a clip's to absorb: encoder, sink, and pipeline errors stay fatal.
     pub(crate) fn on_clip_error(self: &Arc<Self>, src: &gst::Object) -> bool {
         // A torn-down bin's already-queued messages can still arrive; anything
         // no longer under the pipeline is an echo of a handled failure.
@@ -573,8 +571,8 @@ impl Player {
         }
     }
 
-    /// Basename of the active clip (`2018_0704_120000.MP4`), matching what
-    /// vlc-server reports over `/vlc/current`. None when nothing is playing.
+    /// Basename of the active clip (`2018_0704_120000.MP4`), as served over
+    /// `/vlc/current`. None when nothing is playing.
     pub(crate) fn current_basename(&self) -> Option<String> {
         let index = self.clips.lock().unwrap().first()?.index;
         Some(self.basename_at(index))

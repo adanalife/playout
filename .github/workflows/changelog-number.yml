@@ -6,8 +6,9 @@ name: changelog-number
 # renames it to <PR#>.<type>.md and commits it back, giving the release
 # changelog a PR link per entry.
 #
-# The changelog gate (changelog.yml) already accepts "+" fragments natively, so
-# nothing is blocked before this runs — this only upgrades the fragment's name.
+# The changelog gate (a step of the `gates` job in pr-gates.yml) accepts "+"
+# fragments natively, so nothing is blocked before this runs — this only
+# upgrades the fragment's name.
 #
 # Pushed with the automation app token (not GITHUB_TOKEN) so the rename commit
 # re-fires the PR's checks against the numbered state; a GITHUB_TOKEN push
