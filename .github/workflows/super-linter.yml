@@ -33,8 +33,8 @@ jobs:
           VALIDATE_ALL_CODEBASE: true
           ENABLE_GITHUB_PULL_REQUEST_SUMMARY_COMMENT: false
           # Excluded paths:
-          #   - cdk8s/dist/: synth output, golden-gated by cdk8s-synth.yml —
-          #     lint the authoring code, not the artifact.
+          #   - cdk8s/dist/: synth output, golden-gated by the pr-gates synth
+          #     step — lint the authoring code, not the artifact.
           #   - uv.lock / Cargo.lock: machine-generated; their hashes trip
           #     codespell.
           #   - towncrier-template.md: a Jinja template that *produces* markdown;
