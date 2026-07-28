@@ -71,8 +71,6 @@ pub async fn run(player: SharedPlayer) {
         .expect("HTTP_PORT must be a number");
 
     let app = Router::new()
-        // Bare /health is a legacy alias of /health/live.
-        .route("/health", get(live))
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/version", get(version))

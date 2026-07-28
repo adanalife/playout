@@ -199,15 +199,18 @@ impl Control {
             let verb = verb.to_owned();
             let player = player.clone();
             let payload = msg.payload.clone();
+            // Counted here rather than in `dispatch`: every subject that lands
+            // in this loop is a command, so one increment covers all the verbs
+            // including seek, which takes its own path below.
+            crate::telemetry::COMMANDS.add(
+                1,
+                &crate::telemetry::attrs_with(opentelemetry::KeyValue::new("verb", verb.clone())),
+            );
             // seek resolves its landing spot before touching the pipeline:
             // the walk discovers clip durations (file I/O), which must stay
             // off the GLib main loop that clip teardown shares. Only the
             // final play_index hops onto it, like every other mutation.
             if verb == "seek" {
-                crate::telemetry::COMMANDS.add(
-                    1,
-                    &crate::telemetry::attrs_with(opentelemetry::KeyValue::new("verb", verb)),
-                );
                 let delta_ms = serde_json::from_slice::<DeltaArg>(&payload)
                     .map(|a| a.delta_ms)
                     .unwrap_or(0);
@@ -261,15 +264,6 @@ fn verb_of<'a>(subject: &'a str, base: &str, platform: &str) -> Option<&'a str> 
 
 /// Map a command verb + payload to a Player operation. Runs on the main loop.
 fn dispatch(player: &SharedPlayer, verb: &str, payload: &[u8]) {
-    if matches!(
-        verb,
-        "play.random" | "play.file" | "play.at" | "skip" | "back"
-    ) {
-        crate::telemetry::COMMANDS.add(
-            1,
-            &crate::telemetry::attrs_with(opentelemetry::KeyValue::new("verb", verb.to_string())),
-        );
-    }
     match verb {
         "play.random" => player.play_random(),
         "play.file" => {

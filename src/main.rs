@@ -147,9 +147,7 @@ fn main() -> Result<()> {
     // playout-twitch) sharing one Sentry project; the `platform` tag makes
     // twitch vs youtube errors filterable within it, matching the Go fleet.
     let platform = env_or("STREAM_PLATFORM", "youtube");
-    if !platform.is_empty() {
-        sentry::configure_scope(|scope| scope.set_tag("platform", &platform));
-    }
+    sentry::configure_scope(|scope| scope.set_tag("platform", &platform));
     run()
 }
 
