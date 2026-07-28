@@ -211,13 +211,21 @@ class PlayoutInstance(Construct):
         # The CPU request is the CFS weight under contention — the minipc
         # co-tenants two OBS encoders and the batch pipeline, so prod sizes
         # this for real.
-        # Memory sizes for the worst case the encoder knob allows: full decode →
-        # scale/rate → x264 encode of two concurrent 1080p60 clips (active +
-        # prerolled next). 1Gi OOM-killed during preroll on the real corpus.
-        # ponytail: 4Gi ceiling is provisional; tune down once steady RSS is
-        # measured on stage.
+        #
+        # The memory ceiling follows the encode mode, because they differ by an
+        # order of magnitude:
+        #   passthrough — no raw frames exist anywhere in the pipeline, just two
+        #     parsed H.264 clip bins. Prod's five instances hold 96-185Mi steady,
+        #     420Mi worst observed.
+        #   x264/vah264enc — full decode → scale/rate → encode of two concurrent
+        #     1080p60 clips (active + prerolled next). 1Gi OOM-killed during
+        #     preroll on the real corpus. ponytail: no measurement of the ceiling
+        #     survives (the corpus-warm fix in #62 landed after the last x264
+        #     run), so 4Gi stays a guess until a re-encode env runs long enough
+        #     to profile.
+        mem_limit = "1Gi" if env.encoder == "passthrough" else "4Gi"
         requests: dict[str, str] = {"cpu": env.cpu_request, "memory": "512Mi"}
-        limits: dict[str, str] = {"memory": "4Gi"}
+        limits: dict[str, str] = {"memory": mem_limit}
         if env.gpu:
             requests["gpu.intel.com/i915"] = "1"
             limits["gpu.intel.com/i915"] = "1"

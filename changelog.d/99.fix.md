@@ -1,0 +1,1 @@
+Size playout's memory limit to the encode mode: 1Gi for `passthrough` (prod and stage both run it — five prod instances hold 96-185Mi steady, 420Mi worst observed over five days), 4Gi kept for the decode-and-re-encode modes. Frees 3Gi of per-instance headroom on the minipc, 15Gi across the prod fleet.
