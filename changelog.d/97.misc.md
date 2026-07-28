@@ -1,0 +1,1 @@
+Dropped the unreachable `SUPPORTED_PLATFORMS` subset guard from the cdk8s config — every env sets `platforms` from that same tuple, and `platforms-contract` is what actually catches gateway-side drift.
