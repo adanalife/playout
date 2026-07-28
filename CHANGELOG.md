@@ -2,6 +2,26 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.15.2] — 2026-07-28
+
+### Removed
+
+- The unused bare `/health` alias. Liveness/readiness probes use `/health/live` and `/health/ready`; tripbot reads `/vlc/current`. ([#96](https://github.com/adanalife/playout/pull/96))
+
+### Fixed
+
+- Size playout's memory limit to the encode mode: 1Gi for `passthrough` (prod and stage both run it — five prod instances hold 96-185Mi steady, 420Mi worst observed over five days), 4Gi kept for the decode-and-re-encode modes. Frees 3Gi of per-instance headroom on the minipc, 15Gi across the prod fleet. ([#99](https://github.com/adanalife/playout/pull/99))
+
+### CI / Tooling
+
+- Collapse the fast per-PR gates (conventional title, changelog fragment, platforms.json contract, cdk8s dist sync) into a single `gates` job in `pr-gates.yml`. Actions bills per job rounded up to the minute, so four short checks cost four minutes; as steps of one job they cost one. ([#93](https://github.com/adanalife/playout/pull/93))
+- Trimmed the CI surface: the post-merge `cdk8s-synth` workflow is gone (the `pr-gates` synth step already covers every change into main), `platforms-contract` runs on its daily schedule only, and the base-image mirror installs a pinned `crane` release binary instead of compiling it from source on every run. ([#95](https://github.com/adanalife/playout/pull/95))
+
+### Misc
+
+- NATS commands are counted once where they arrive instead of separately in `dispatch` and the seek fast-path — same `playout_commands_total` series, one increment site. ([#96](https://github.com/adanalife/playout/pull/96))
+- Dropped the unreachable `SUPPORTED_PLATFORMS` subset guard from the cdk8s config — every env sets `platforms` from that same tuple, and `platforms-contract` is what actually catches gateway-side drift. ([#97](https://github.com/adanalife/playout/pull/97))
+
 ## [v0.15.1] — 2026-07-23
 
 ### Fixed
