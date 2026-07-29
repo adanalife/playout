@@ -1,0 +1,1 @@
+Fail the test job when the behavior harness's external tools (`mediamtx`, `nats-server`, `gst-launch-1.0`) are missing in CI, instead of silently skipping all ten integration tests and reporting green.

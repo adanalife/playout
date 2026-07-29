@@ -6,7 +6,9 @@
 //!
 //! Requires `mediamtx`, `nats-server`, and `gst-launch-1.0` on PATH; each
 //! test skips (passing) when they're missing, so plain `cargo test` still
-//! works on a machine without them. CI installs all three.
+//! works on a machine without them. CI installs all three and sets
+//! `PLAYOUT_TOOLS_REQUIRED`, which turns that skip into a failure — otherwise a
+//! broken tool install leaves the whole harness a green no-op.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -26,27 +28,43 @@ static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 macro_rules! serial_or_skip {
     () => {
         let _guard = SERIAL.lock().await;
-        if !tools_available() {
-            eprintln!("skipping: mediamtx / nats-server / gst-launch-1.0 not all on PATH");
+        let missing = missing_tools();
+        if !missing.is_empty() {
+            // Skipping is the right answer on a laptop without the tools, and
+            // the wrong one in CI: there the whole harness would stop asserting
+            // and still report green. PLAYOUT_TOOLS_REQUIRED marks the
+            // environments that installed the tools on purpose.
+            assert!(
+                std::env::var_os("PLAYOUT_TOOLS_REQUIRED").is_none(),
+                "PLAYOUT_TOOLS_REQUIRED is set, so the behavior harness must run, \
+                 but these are not on PATH: {missing:?}"
+            );
+            eprintln!("skipping: not on PATH: {missing:?}");
             return;
         }
     };
 }
 
-fn tools_available() -> bool {
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        ["mediamtx", "nats-server", "gst-launch-1.0"]
-            .iter()
-            .all(|bin| {
-                Command::new(bin)
-                    .arg("--version")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok()
-            })
-    })
+/// Which of the harness's external tools are absent; empty when all are
+/// present. `--version` on each: every one of them exits promptly on it, so
+/// spawnability is the signal and nothing is left running.
+fn missing_tools() -> &'static [&'static str] {
+    static MISSING: OnceLock<Vec<&'static str>> = OnceLock::new();
+    MISSING
+        .get_or_init(|| {
+            ["mediamtx", "nats-server", "gst-launch-1.0"]
+                .into_iter()
+                .filter(|bin| {
+                    Command::new(bin)
+                        .arg("--version")
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .is_err()
+                })
+                .collect()
+        })
+        .as_slice()
 }
 
 fn free_port() -> u16 {

@@ -33,8 +33,9 @@ jobs:
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-ugly gstreamer1.0-libav \
             gstreamer1.0-rtsp gstreamer1.0-tools
-      # Real MediaMTX + NATS for tests/behavior.rs — the tests skip when these
-      # are missing, so keep them installed or the harness silently no-ops.
+      # Real MediaMTX + NATS for tests/behavior.rs. The tests skip when these
+      # are missing, so PLAYOUT_TOOLS_REQUIRED below turns a skip here into a
+      # failure — otherwise a broken install leaves the harness a green no-op.
       - name: Install MediaMTX and NATS server
         run: |
           curl -fsSL https://github.com/bluenviron/mediamtx/releases/download/v1.19.2/mediamtx_v1.19.2_linux_amd64.tar.gz \
@@ -43,3 +44,7 @@ jobs:
             | sudo tar -xz --strip-components=1 -C /usr/local/bin nats-server-v2.14.3-linux-amd64/nats-server
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+        env:
+          # This runner installed the harness's tools, so a skip is an install
+          # regression, not a missing-tool laptop. Fail instead of passing empty.
+          PLAYOUT_TOOLS_REQUIRED: '1'
