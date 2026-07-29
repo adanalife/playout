@@ -155,6 +155,21 @@ fn corrupt_corpus() -> &'static Path {
     })
 }
 
+/// A corpus where every `.mp4` is garbage — the deployment fault that must
+/// crash-loop visibly rather than spin through recovery forever.
+fn all_bad_corpus() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("playout-parity-allbad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in CLIPS {
+            std::fs::write(dir.join(name), b"this is not an mp4").unwrap();
+        }
+        dir
+    })
+}
+
 /// Long-clip corpus (20s, small frames for cheap encode) for tests that
 /// assert "current did NOT change" — with 2s clips a natural boundary lands
 /// mid-assertion and reads as a leaked command.
@@ -665,6 +680,58 @@ async fn resume_into_corrupt_clip_recovers() {
         },
     );
     assert!(CLIPS.contains(&cur.as_str()), "landed on {cur:?}");
+}
+
+/// Per-clip recovery is bounded: once consecutive failures outrun the playlist
+/// the whole corpus is bad, which is a deployment fault, not a clip to skip.
+/// Exit non-zero and let the pod crash-loop where it can be seen — the failure
+/// mode this replaces is respawning garbage bins at full tilt forever, which
+/// looks like a healthy process and airs nothing.
+#[tokio::test]
+async fn an_entirely_bad_corpus_gives_up_instead_of_spinning() {
+    serial_or_skip!();
+    let (_nats, nport) = start_nats();
+    let (_mtx, mport) = start_mediamtx();
+    let mut p = start_playout(all_bad_corpus(), Some(nport), mport, "youtube");
+
+    // Readiness never comes here, so wait on the exit rather than on /health.
+    let status = wait_for("playout to give up", Duration::from_secs(30), || {
+        p.proc.0.try_wait().unwrap()
+    });
+    assert!(
+        !status.success(),
+        "an unplayable corpus exited {status:?}; k8s would read that as a clean stop"
+    );
+}
+
+/// The control plane is best-effort: with no NATS reachable playout can't be
+/// commanded and can't resume its exact spot, but it must still loop the corpus
+/// on air. A boot that waits on NATS forever, or gives up without it, takes the
+/// stream down over a dependency that isn't on the playback path.
+#[tokio::test]
+async fn no_nats_still_plays_the_corpus() {
+    serial_or_skip!();
+    let (_mtx, mport) = start_mediamtx();
+    let p = start_playout(corpus(), None, mport, "youtube");
+
+    // An unreachable NATS costs three serial 10s timeouts before the first clip
+    // spawns — the connect window, then the stream-ensure, then the resume read,
+    // the last two guaranteed to time out because the window already concluded
+    // there is no connection. Measured at 31s to readiness, so the usual 30s
+    // budget is too tight. The number is the point: this is dead air on every
+    // restart while NATS is down, and worth shortening.
+    wait_for(
+        "readiness with no control plane",
+        Duration::from_secs(90),
+        || matches!(http_get(p.http, "/health/ready"), Some((200, _))).then_some(()),
+    );
+
+    wait_all_clips_seen(p.http, "clips to advance with no control plane");
+    wait_for(
+        "MediaMTX path to have a publisher",
+        Duration::from_secs(10),
+        || describe_ok(&p.rtsp_url).then_some(()),
+    );
 }
 
 /// The lastplayed ticker keeps the JetStream last-value cache advancing while
