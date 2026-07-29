@@ -491,9 +491,15 @@ mod tests {
         let threshold = interval * 3 / 2;
         assert!(!is_frame_gap(u64::MAX, 12345, threshold)); // first buffer
         assert!(!is_frame_gap(0, interval, threshold)); // steady 60fps step
-        assert!(!is_frame_gap(0, interval, threshold)); // exactly one interval
+        // Either side of the threshold: the widest step that is still not a gap,
+        // and the narrowest one that is. A drifting comparison shows up here
+        // before it shows up as a miscounted stall on the dashboard.
+        assert!(!is_frame_gap(0, threshold, threshold));
+        assert!(is_frame_gap(0, threshold + 1, threshold));
         assert!(is_frame_gap(0, interval * 2, threshold)); // a frame missing
         assert!(!is_frame_gap(interval * 5, interval * 4, threshold)); // non-increasing timestamp
+        // Late frames near the u64 ceiling must not wrap into a false negative.
+        assert!(!is_frame_gap(u64::MAX - 1, u64::MAX, threshold));
     }
 
     #[test]
