@@ -39,6 +39,14 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// The deploy-env id (`prod-1` / `stage-1`) the fleet partitions telemetry by —
+/// both the Sentry environment tag and the `deployment.environment` OTLP label.
+/// Distinct from `ENV`, which is the NATS subject env (`production` /
+/// `staging`) and only stands in for local runs.
+fn deployment_env() -> String {
+    env_or("DEPLOYMENT_ENVIRONMENT", &env_or("ENV", "development"))
+}
+
 /// Recursively collect the `.mp4` files (case-insensitive) under `dir`,
 /// sorted by full path. Today's corpus is flat, but the scan must not
 /// silently miss a subdir the day one appears. An empty corpus is a
@@ -135,12 +143,12 @@ fn is_frame_gap(prev_ns: u64, ts_ns: u64, threshold_ns: u64) -> bool {
 
 fn main() -> Result<()> {
     // Reads SENTRY_DSN from the environment; unset (local runs) leaves the
-    // client disabled. ENV (development/staging/production) doubles as the
-    // Sentry environment tag, matching the Go fleet. Init precedes the tokio
-    // runtime so the transport thread outlives every worker.
+    // client disabled. The environment tag carries the deploy-env id so
+    // playout's issues filter alongside the rest of the fleet's. Init precedes
+    // the tokio runtime so the transport thread outlives every worker.
     let _sentry = sentry::init(sentry::ClientOptions {
         release: Some(format!("playout@{VERSION}").into()),
-        environment: std::env::var("ENV").ok().map(Into::into),
+        environment: Some(deployment_env().into()),
         ..Default::default()
     });
     // One binary serves per-platform deployments (playout-youtube,
@@ -172,11 +180,9 @@ async fn run() -> Result<()> {
     let nats_env = env_or("ENV", "development");
     let platform = env_or("STREAM_PLATFORM", "youtube");
     let nats_url = env_or("NATS_URL", "nats://localhost:4222");
-    // The deployment.environment OTLP label is the k8s namespace (prod-1 /
-    // stage-1), matching the Go fleet so playout's series share the dashboards'
-    // env filter. Distinct from ENV, which is the NATS subject env
-    // (production / staging). Falls back to the NATS env for local runs.
-    let deployment_env = env_or("DEPLOYMENT_ENVIRONMENT", &nats_env);
+    // The k8s namespace, so playout's series share the dashboards' env filter
+    // with the Go fleet's.
+    let deployment_env = deployment_env();
 
     let meter_provider = telemetry::init(&platform, &deployment_env);
 
