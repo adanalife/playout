@@ -47,6 +47,15 @@ fn deployment_env() -> String {
     env_or("DEPLOYMENT_ENVIRONMENT", &env_or("ENV", "development"))
 }
 
+/// Whether a deploy env reports to Sentry. Only prod does: stage runs the same
+/// binary against parked platforms and upstreams that are routinely absent, so
+/// its errors describe the environment rather than a defect, and they'd spend a
+/// shared event budget saying so. Stage errors still reach Loki and the
+/// dashboards, which is where a stage question gets answered anyway.
+fn sends_to_sentry(deploy_env: &str) -> bool {
+    deploy_env == "prod-1"
+}
+
 /// Recursively collect the `.mp4` files (case-insensitive) under `dir`,
 /// sorted by full path. Today's corpus is flat, but the scan must not
 /// silently miss a subdir the day one appears. An empty corpus is a
@@ -144,12 +153,18 @@ fn is_frame_gap(prev_ns: u64, ts_ns: u64, threshold_ns: u64) -> bool {
 fn main() -> Result<()> {
     // Reads SENTRY_DSN from the environment; unset (local runs) leaves the
     // client disabled. The environment tag carries the deploy-env id so
-    // playout's issues filter alongside the rest of the fleet's. Init precedes
-    // the tokio runtime so the transport thread outlives every worker.
-    let _sentry = sentry::init(sentry::ClientOptions {
-        release: Some(format!("playout@{VERSION}").into()),
-        environment: Some(deployment_env().into()),
-        ..Default::default()
+    // playout's issues filter alongside the rest of the fleet's. Skipping init
+    // entirely is what silences a non-sending env — leaving the DSN out of
+    // ClientOptions wouldn't, since apply_defaults reads SENTRY_DSN itself.
+    // Init precedes the tokio runtime so the transport thread outlives every
+    // worker, and the guard lives to the end of main so it flushes on exit.
+    let deploy_env = deployment_env();
+    let _sentry = sends_to_sentry(&deploy_env).then(|| {
+        sentry::init(sentry::ClientOptions {
+            release: Some(format!("playout@{VERSION}").into()),
+            environment: Some(deploy_env.clone().into()),
+            ..Default::default()
+        })
     });
     // One binary serves per-platform deployments (playout-youtube,
     // playout-twitch) sharing one Sentry project; the `platform` tag makes
@@ -458,7 +473,17 @@ async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_frame_gap, scan_video_dir};
+    use super::{is_frame_gap, scan_video_dir, sends_to_sentry};
+
+    #[test]
+    fn only_prod_reports_to_sentry() {
+        assert!(sends_to_sentry("prod-1"));
+        assert!(!sends_to_sentry("stage-1"));
+        assert!(!sends_to_sentry("development"));
+        // The NATS subject env is not a deploy-env id — if the tag ever
+        // regresses to it, this env must not start sending.
+        assert!(!sends_to_sentry("production"));
+    }
 
     #[test]
     fn frame_gap_detection() {
