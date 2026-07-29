@@ -1,0 +1,1 @@
+Only report to Sentry from prod. Stage runs the same binary against parked platforms and routinely-absent upstreams, so its errors described the environment rather than a defect while spending the shared event budget — 143 of them from stage `rtspclientsink` alone. Stage errors still reach Loki and the dashboards.
