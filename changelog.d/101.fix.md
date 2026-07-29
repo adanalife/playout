@@ -1,0 +1,1 @@
+Tag Sentry events with the deploy-env id (`prod-1` / `stage-1`) instead of the NATS subject env (`production` / `staging`), so playout issues filter alongside the rest of the fleet under the same environment. The `DEPLOYMENT_ENVIRONMENT` lookup shared with the OTLP label moved into one helper.
