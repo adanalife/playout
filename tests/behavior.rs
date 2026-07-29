@@ -366,6 +366,54 @@ async fn publish_command(port: u16, platform: &str, verb: &str, payload: &str) {
     client.flush().await.expect("flushing command");
 }
 
+/// Wait for a lastplayed publish, then for it to change — the playhead the
+/// console map reads is moving, not frozen at whatever it booted on.
+async fn wait_ticker_advances(port: u16, platform: &str) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let first = loop {
+        if let Some(v) = read_lastplayed(port, platform).await {
+            break v;
+        }
+        assert!(Instant::now() < deadline, "no ticker publish within 15s");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    assert!(CLIPS.contains(&first.0.as_str()));
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(next) = read_lastplayed(port, platform).await
+            && next != first
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ticker did not advance within 15s"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Every clip in the corpus shows up within a couple of cycles — with 2s clips
+/// that holds no matter which clip the cold boot picked. Returns how long it
+/// took, so a caller can tell realtime playback from a pipeline racing ahead.
+fn wait_all_clips_seen(http: u16, what: &str) -> Duration {
+    let started = Instant::now();
+    let mut seen = std::collections::HashSet::new();
+    wait_for(
+        what,
+        Duration::from_secs(3 * CLIP_SECONDS * CLIPS.len() as u64),
+        || {
+            let c = current(http);
+            if !c.is_empty() {
+                seen.insert(c);
+            }
+            (seen.len() == CLIPS.len()).then_some(())
+        },
+    );
+    started.elapsed()
+}
+
 fn clip_after(name: &str, steps: usize) -> &'static str {
     let i = CLIPS.iter().position(|c| *c == name).expect("known clip");
     CLIPS[(i + steps) % CLIPS.len()]
@@ -529,17 +577,38 @@ async fn boundaries_advance_and_wrap() {
     let p = start_playout(corpus(), Some(nport), mport, "youtube");
     wait_ready(p.http);
 
-    let mut seen = std::collections::HashSet::new();
-    wait_for(
-        "all clips to play through boundaries",
-        Duration::from_secs(3 * CLIP_SECONDS * CLIPS.len() as u64),
-        || {
-            let c = current(p.http);
-            if !c.is_empty() {
-                seen.insert(c);
-            }
-            (seen.len() == CLIPS.len()).then_some(())
-        },
+    wait_all_clips_seen(p.http, "all clips to play through boundaries");
+}
+
+/// The console's chat-map mode: the MediaMTX relay is parked (its Deployment
+/// scaled to 0) and playout is expected to stay up map-only — a fakesink in
+/// place of the RTSP publish, so the pipeline still reaches PLAYING and the
+/// playhead the console map reads keeps advancing while nothing leaves the pod.
+///
+/// No relay exists here at all, so reaching readiness at all discriminates the
+/// modes: had boot wired the encode branch instead, rtspclientsink would have
+/// failed to connect and taken the pipeline down.
+#[tokio::test]
+async fn map_only_plays_and_advances_without_a_relay() {
+    serial_or_skip!();
+    let (_nats, nport) = start_nats();
+    // A port nothing listens on: relay_up's connect is refused, so boot picks
+    // the map-only pipeline.
+    let p = start_playout(corpus(), Some(nport), free_port(), "youtube");
+    wait_ready(p.http);
+
+    let elapsed = wait_all_clips_seen(p.http, "clips to advance with no relay to publish to");
+    wait_ticker_advances(nport, "youtube").await;
+
+    // With no sink pacing the pipeline to the clock, a map-only fakesink
+    // consumes the corpus as fast as it decodes and the playhead the console
+    // map reads flies across the country. Crossing two clip boundaries can't
+    // beat one clip's duration in realtime; without `sync` it takes well under
+    // a second.
+    assert!(
+        elapsed >= Duration::from_secs(CLIP_SECONDS),
+        "map-only playback raced through {} clips in {elapsed:?}; the fakesink is not clock-paced",
+        CLIPS.len()
     );
 }
 
@@ -608,29 +677,7 @@ async fn lastplayed_ticker_advances() {
     let p = start_playout(corpus(), Some(nport), mport, "youtube");
     wait_ready(p.http);
 
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let first = loop {
-        if let Some(v) = read_lastplayed(nport, "youtube").await {
-            break v;
-        }
-        assert!(Instant::now() < deadline, "no ticker publish within 15s");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    };
-    assert!(CLIPS.contains(&first.0.as_str()));
-
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(next) = read_lastplayed(nport, "youtube").await
-            && next != first
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "ticker did not advance within 15s"
-        );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    wait_ticker_advances(nport, "youtube").await;
 }
 
 /// ENCODER=passthrough splices the compressed corpus straight to MediaMTX —
@@ -649,18 +696,7 @@ async fn passthrough_publishes_and_splices_boundaries() {
         Duration::from_secs(10),
         || describe_ok(&p.rtsp_url).then_some(()),
     );
-    let mut seen = std::collections::HashSet::new();
-    wait_for(
-        "all clips to splice through passthrough boundaries",
-        Duration::from_secs(3 * CLIP_SECONDS * CLIPS.len() as u64),
-        || {
-            let c = current(p.http);
-            if !c.is_empty() {
-                seen.insert(c);
-            }
-            (seen.len() == CLIPS.len()).then_some(())
-        },
-    );
+    wait_all_clips_seen(p.http, "all clips to splice through passthrough boundaries");
 }
 
 /// Passthrough resume seeks a compressed clip via keyframe snapping.

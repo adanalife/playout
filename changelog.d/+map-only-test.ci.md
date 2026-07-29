@@ -1,0 +1,1 @@
+Cover map-only mode (the console's chat-map path, where the MediaMTX relay is parked) in the behavior harness: it asserts playout stays up on a fakesink pipeline, advances through boundaries, keeps the NATS playhead ticking, and stays clock-paced rather than racing through the corpus.
