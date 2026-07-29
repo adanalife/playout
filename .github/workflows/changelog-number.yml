@@ -61,7 +61,18 @@ jobs:
           for f in changelog.d/+*.md; do
             base="$(basename "$f" .md)"   # +slug.fix
             type="${base##*.}"            # fix
-            git mv "$f" "changelog.d/${PR}.${type}.md"
+            # Two fragments of the same type in one PR both want
+            # <PR>.<type>.md. towncrier reads an optional counter suffix
+            # (<PR>.<type>.<n>.md) and attributes it to the same PR, so walk to
+            # the first free name instead of dying on `git mv: destination
+            # exists`.
+            dest="changelog.d/${PR}.${type}.md"
+            n=1
+            while [ -e "$dest" ]; do
+              dest="changelog.d/${PR}.${type}.${n}.md"
+              n=$((n + 1))
+            done
+            git mv "$f" "$dest"
             renamed=1
           done
           if [ "$renamed" -eq 0 ]; then
