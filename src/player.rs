@@ -752,4 +752,112 @@ mod tests {
         assert_eq!(back_index(2, 3, 5), 4); // 2-3 mod 5
         assert_eq!(back_index(3, 0, 5), 2); // n<1 treated as 1
     }
+
+    /// `delta_ms` is chat input: `!skip 1h30m` in Twitch chat becomes a signed
+    /// span that reaches `seek_walk` unclamped, so the examples above can't
+    /// stand in for the input space. Sweep it instead and assert the one
+    /// property every landing must hold — the playhead is inside a real clip.
+    /// A landing past a clip's end feeds `should_seek_to` an offset the clip
+    /// can't satisfy; a landing off the end of the playlist panics on the
+    /// `files[index]` that follows.
+    ///
+    /// A plain seeded loop, not a fuzzing harness: the input is four integers
+    /// plus a duration table, so `cargo fuzz` (nightly, a second crate, a
+    /// libfuzzer dependency) would buy nothing a xorshift can't reach.
+    #[test]
+    fn seek_walk_always_lands_inside_a_clip() {
+        use super::seek_walk;
+
+        let mut state: u64 = 0x2026_0729;
+        let mut rand = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for case_n in 0..200_000u64 {
+            let len = 1 + (rand() % 12) as usize;
+            // Half the cases use a uniform corpus with deltas that are exact
+            // multiples of a clip and of the whole lap. Fully random durations
+            // never land a walk exactly on a clip boundary, which is where the
+            // off-by-one lives, so chance alone would not reach it.
+            let aligned = case_n % 2 == 0;
+            // Durations as Discoverer really answers them: mostly real, and
+            // occasionally unmeasurable (-1) or zero-length, which the walk
+            // treats as boundaries rather than spans.
+            let clip_ms = 1 + (rand() % 600_000) as i64;
+            let durations: Vec<i64> = (0..len)
+                .map(|_| {
+                    if aligned {
+                        return clip_ms;
+                    }
+                    match rand() % 10 {
+                        0 => -1,
+                        1 => 0,
+                        _ => 1 + (rand() % 600_000) as i64,
+                    }
+                })
+                .collect();
+            let active = (rand() % len as u64) as usize;
+            // Positions include a negative one (the playhead clamps it) and an
+            // absurd one, so the delta arithmetic saturates rather than wraps.
+            let pos_ms = if aligned {
+                clip_ms * (rand() % 3) as i64
+            } else {
+                match rand() % 4 {
+                    0 => 0,
+                    1 => (rand() % 600_000) as i64,
+                    2 => -((rand() % 1_000) as i64),
+                    _ => i64::MAX / 2,
+                }
+            };
+            // Both extremes, plus spans far longer than any real corpus — a
+            // decade of dashcam footage is ~10^11 ms.
+            let delta_ms = if aligned {
+                // Whole clips and whole laps, forward and back.
+                let steps = (rand() % (4 * len as u64 + 1)) as i64;
+                let unit = if rand() % 2 == 0 {
+                    clip_ms
+                } else {
+                    clip_ms * len as i64
+                };
+                let magnitude = steps * unit;
+                if rand() % 2 == 0 {
+                    magnitude
+                } else {
+                    -magnitude
+                }
+            } else {
+                match rand() % 6 {
+                    0 => i64::MIN,
+                    1 => i64::MAX,
+                    2 => (rand() % 10_000_000) as i64,
+                    3 => -((rand() % 10_000_000) as i64),
+                    4 => 0,
+                    _ => (rand() % 1_000_000_000_000) as i64,
+                }
+            };
+
+            let (index, offset) = seek_walk(active, pos_ms, delta_ms, len, |i| {
+                let d = durations[i];
+                (d >= 0).then_some(d)
+            });
+
+            let case = format!(
+                "active={active} pos_ms={pos_ms} delta_ms={delta_ms} durations={durations:?}"
+            );
+            assert!(index < len, "landed off the playlist: {case} -> {index}");
+            assert!(
+                offset >= 0,
+                "landed at a negative offset: {case} -> {offset}"
+            );
+            if durations[index] > 0 {
+                assert!(
+                    offset < durations[index],
+                    "landed past the end of clip {index}: {case} -> {offset}"
+                );
+            }
+        }
+    }
 }
