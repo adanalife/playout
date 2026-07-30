@@ -1,0 +1,1 @@
+Cache the GStreamer apt install and the pinned MediaMTX/NATS release tarballs in the test job. The ~160-package install was the job's least predictable step — 28s on a good day, 83s on a bad one, and once the full 30-minute timeout with zero tests run — and a warm cache now leaves the job with no network fetches at all.

@@ -10,6 +10,22 @@ concurrency:
 permissions:
   contents: read
 
+# Everything the test job installs, declared in one place so each cache key and
+# the thing it keys derive from the same value and can't drift apart. MediaMTX is
+# also mirrored for the Dockerfile (mirror-images.yml); keep the versions in step
+# when bumping.
+env:
+  MEDIAMTX_VERSION: 1.19.2
+  NATS_VERSION: 2.14.3
+  # -ugly (x264enc), -libav (h264 decode), -rtsp (rtspclientsink), and -tools
+  # (gst-launch, clip generation) are for the behavior harness; the two -dev
+  # packages are what the gstreamer crate builds against.
+  GST_PACKAGES: >-
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+    gstreamer1.0-plugins-ugly gstreamer1.0-libav
+    gstreamer1.0-rtsp gstreamer1.0-tools
+
 jobs:
   test:
     name: test
@@ -23,25 +39,68 @@ jobs:
       # toolchain, so an env-var profile override is not enough).
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
-      # -ugly (x264enc), -libav (h264 decode), -rtsp (rtspclientsink), and
-      # -tools (gst-launch, clip generation) are for the behavior harness.
+      # Cached because ~160 packages off a cold mirror is the job's least
+      # predictable step: 28s on a good day, 83s on a bad one, and once the full
+      # 30-minute timeout with zero tests run (on a release PR). The .debs never
+      # change for a pinned package list, so keep them and install from disk.
+      #
+      # ImageVersion is in the key on purpose: `apt-get -d` downloads only what
+      # the runner image is missing, so a cache from an older image can be an
+      # incomplete set. A new image release earns a fresh download.
+      - name: Cache GStreamer packages
+        id: gst-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/gst-debs
+          key: gst-debs-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageVersion }}
+      - name: Download GStreamer packages
+        if: steps.gst-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          mkdir -p ~/gst-debs/partial
+          # shellcheck disable=SC2086  # GST_PACKAGES must split into one argument per package
+          sudo apt-get install -y --no-install-recommends --download-only \
+            -o Dir::Cache::archives="$HOME/gst-debs" $GST_PACKAGES
+          sudo chown -R "$(id -u):$(id -g)" ~/gst-debs
+          rm -rf ~/gst-debs/partial
+      # dpkg rather than apt: apt would need its package lists, which means
+      # another trip to the mirror. The download step above resolved the full
+      # dependency closure, so everything needed is already on disk.
       - name: Install GStreamer
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-            gstreamer1.0-plugins-ugly gstreamer1.0-libav \
-            gstreamer1.0-rtsp gstreamer1.0-tools
+          set -euo pipefail
+          sudo dpkg -i ~/gst-debs/*.deb
+          pkg-config --modversion gstreamer-1.0 glib-2.0
       # Real MediaMTX + NATS for tests/behavior.rs. The tests skip when these
       # are missing, so PLAYOUT_TOOLS_REQUIRED below turns a skip here into a
       # failure — otherwise a broken install leaves the harness a green no-op.
+      #
+      # Both are pinned release tarballs, so the cache key is just the versions
+      # — the only two network fetches left in this job, and the last thing that
+      # could hang it on someone else's outage.
+      - name: Cache MediaMTX and NATS server
+        id: relay-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/playout-ci/mediamtx
+            ~/.cache/playout-ci/nats-server
+          key: relay-bins-mediamtx-${{ env.MEDIAMTX_VERSION }}-nats-${{ env.NATS_VERSION }}
+      - name: Download MediaMTX and NATS server
+        if: steps.relay-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.cache/playout-ci
+          curl -fsSL "https://github.com/bluenviron/mediamtx/releases/download/v${MEDIAMTX_VERSION}/mediamtx_v${MEDIAMTX_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C ~/.cache/playout-ci mediamtx
+          curl -fsSL "https://github.com/nats-io/nats-server/releases/download/v${NATS_VERSION}/nats-server-v${NATS_VERSION}-linux-amd64.tar.gz" \
+            | tar -xz --strip-components=1 -C ~/.cache/playout-ci "nats-server-v${NATS_VERSION}-linux-amd64/nats-server"
       - name: Install MediaMTX and NATS server
         run: |
-          curl -fsSL https://github.com/bluenviron/mediamtx/releases/download/v1.19.2/mediamtx_v1.19.2_linux_amd64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin mediamtx
-          curl -fsSL https://github.com/nats-io/nats-server/releases/download/v2.14.3/nats-server-v2.14.3-linux-amd64.tar.gz \
-            | sudo tar -xz --strip-components=1 -C /usr/local/bin nats-server-v2.14.3-linux-amd64/nats-server
+          set -euo pipefail
+          sudo install -m 0755 ~/.cache/playout-ci/mediamtx /usr/local/bin/mediamtx
+          sudo install -m 0755 ~/.cache/playout-ci/nats-server /usr/local/bin/nats-server
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
         env:
