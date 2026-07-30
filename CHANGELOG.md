@@ -2,6 +2,19 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.15.3] — 2026-07-30
+
+### Fixed
+
+- Tag Sentry events with the deploy-env id (`prod-1` / `stage-1`) instead of the NATS subject env (`production` / `staging`), so playout issues filter alongside the rest of the fleet under the same environment. The `DEPLOYMENT_ENVIRONMENT` lookup shared with the OTLP label moved into one helper. ([#101](https://github.com/adanalife/playout/pull/101))
+- Only report to Sentry from prod. Stage runs the same binary against parked platforms and routinely-absent upstreams, so its errors described the environment rather than a defect while spending the shared event budget — 143 of them from stage `rtspclientsink` alone. Stage errors still reach Loki and the dashboards. ([#103](https://github.com/adanalife/playout/pull/103))
+- Cut boot-to-ready from 31s to 11.6s when NATS is unreachable. The stream-ensure and the resume read each spent a guaranteed 10s JetStream timeout on the boot path rediscovering what the connect window had already settled, delaying first frame by 20s on every restart while NATS was down or slow to come up alongside playout. The stream is now declared by a task that waits for a connection first, so it still gets created the moment NATS appears. ([#105](https://github.com/adanalife/playout/pull/105))
+
+### CI / Tooling
+
+- Close three gaps in the test suite: the test job now fails when the behavior harness's external tools (`mediamtx`, `nats-server`, `gst-launch-1.0`) are missing, instead of silently skipping every integration test and reporting green; map-only mode (the console's chat-map path, where the MediaMTX relay is parked) is covered end to end; and the RTSP watchdog's decision loop — failure threshold, reset on recovery, cold-boot initial delay — is covered on tokio's virtual clock. ([#104](https://github.com/adanalife/playout/pull/104))
+- Close the rest of the test-suite audit: cover the bounded-recovery give-up (an entirely unplayable corpus must crash-loop, not spin) and the no-control-plane boot, sweep `seek_walk`'s input space for landings outside a clip, cover the OTLP header parser, and replace two assertions that could not fail. Also fixes `changelog-number` dying when one PR carries two fragments of the same type. ([#104](https://github.com/adanalife/playout/pull/104))
+
 ## [v0.15.2] — 2026-07-28
 
 ### Removed
