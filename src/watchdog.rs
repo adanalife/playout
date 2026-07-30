@@ -5,6 +5,7 @@
 //! Exit non-zero and let k8s restart the pod; resume comes from JetStream.
 
 use anyhow::{Context, Result, bail};
+use std::future::Future;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info, warn};
@@ -96,10 +97,38 @@ pub async fn run(rtsp_url: String, on_dead: impl Fn() + Send + 'static) {
         threshold = FAILURE_THRESHOLD,
         "starting RTSP watchdog"
     );
-    tokio::time::sleep(INITIAL_DELAY).await;
+    // Each probe gets its own owned copy of the url so the future it returns
+    // borrows nothing from the closure — `run` is spawned, and a probe future
+    // that borrows its closure isn't Send.
+    watch(
+        INITIAL_DELAY,
+        INTERVAL,
+        move || {
+            let url = rtsp_url.clone();
+            async move { describe(&url).await }
+        },
+        on_dead,
+    )
+    .await;
+}
+
+/// The watchdog's decision loop, over any probe: wait out `initial`, then probe
+/// every `interval`, and invoke `on_dead` (and return) once `FAILURE_THRESHOLD`
+/// probes have failed back to back. A success resets the count — transient
+/// blips must not accumulate into a restart across hours of healthy probes.
+///
+/// Taking the probe as a parameter is what makes the counting testable without
+/// a relay: the tests drive it with scripted outcomes on tokio's virtual clock.
+async fn watch<Fut: Future<Output = Result<()>>>(
+    initial: Duration,
+    interval: Duration,
+    mut probe: impl FnMut() -> Fut,
+    on_dead: impl Fn(),
+) {
+    tokio::time::sleep(initial).await;
     let mut consecutive = 0u32;
     loop {
-        match describe(&rtsp_url).await {
+        match probe().await {
             Ok(()) => {
                 if consecutive > 0 {
                     info!(after_failures = consecutive, "RTSP DESCRIBE recovered");
@@ -121,7 +150,7 @@ pub async fn run(rtsp_url: String, on_dead: impl Fn() + Send + 'static) {
                 }
             }
         }
-        tokio::time::sleep(INTERVAL).await;
+        tokio::time::sleep(interval).await;
     }
 }
 
@@ -150,6 +179,7 @@ pub async fn run_reappear(rtsp_url: String, on_up: impl Fn() + Send + 'static) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use tokio::io::AsyncWriteExt;
 
     #[test]
@@ -199,5 +229,73 @@ mod tests {
         let dead = serve_one("RTSP/1.0 404 Not Found\r\nCSeq: 1\r\n\r\n").await;
         let err = describe(&dead).await.unwrap_err();
         assert!(err.to_string().contains("404"));
+    }
+
+    /// Drives `watch` with scripted probe outcomes (`true` = healthy), falling
+    /// back to healthy once the script runs out. Returns (probe count, whether
+    /// the watchdog declared the publish dead). `start_paused` runs the callers
+    /// on tokio's virtual clock, so the 30s delay and intervals cost no wall
+    /// time; `cap_intervals` bounds a watchdog that correctly never fires.
+    async fn drive(outcomes: &[bool], cap_intervals: u32) -> (usize, bool) {
+        let calls = Cell::new(0usize);
+        let died = Cell::new(false);
+        // Shared references are Copy, so the probe future carries one of its
+        // own instead of borrowing the closure it came from.
+        let counter = &calls;
+        let loop_fut = watch(
+            INITIAL_DELAY,
+            INTERVAL,
+            move || async move {
+                let i = counter.get();
+                counter.set(i + 1);
+                match outcomes.get(i).copied().unwrap_or(true) {
+                    true => Ok(()),
+                    false => bail!("scripted probe failure"),
+                }
+            },
+            || died.set(true),
+        );
+        let _ = tokio::time::timeout(INITIAL_DELAY + INTERVAL * cap_intervals, loop_fut).await;
+        (calls.get(), died.get())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dies_on_exactly_the_threshold_of_consecutive_failures() {
+        let (probes, died) = drive(&[false, false, false], 10).await;
+        assert!(died, "watchdog never declared the publish dead");
+        // Exactly the threshold, not one probe more or fewer: firing early
+        // restarts the pod on a blip, firing late leaves a dead publish airing.
+        assert_eq!(probes, FAILURE_THRESHOLD as usize);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn holds_when_failures_are_not_consecutive() {
+        // Two failures, a recovery, two more — never three back to back, so a
+        // watchdog that resets on success must ride it out indefinitely.
+        let (probes, died) = drive(&[false, false, true, false, false], 40).await;
+        assert!(
+            !died,
+            "fired on non-consecutive failures after {probes} probes"
+        );
+        assert!(probes > 5, "stopped probing after {probes}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_initial_delay_holds_off_the_first_probe() {
+        // Cold boot: MediaMTX answers DESCRIBE 404 until our first publish
+        // lands, so probing before the delay would kill every single boot.
+        let calls = Cell::new(0usize);
+        let counter = &calls;
+        let loop_fut = watch(
+            INITIAL_DELAY,
+            INTERVAL,
+            move || async move {
+                counter.set(counter.get() + 1);
+                bail!("would fail if probed")
+            },
+            || {},
+        );
+        let _ = tokio::time::timeout(INITIAL_DELAY - Duration::from_secs(1), loop_fut).await;
+        assert_eq!(calls.get(), 0, "probed before the initial delay elapsed");
     }
 }

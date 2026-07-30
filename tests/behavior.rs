@@ -6,7 +6,9 @@
 //!
 //! Requires `mediamtx`, `nats-server`, and `gst-launch-1.0` on PATH; each
 //! test skips (passing) when they're missing, so plain `cargo test` still
-//! works on a machine without them. CI installs all three.
+//! works on a machine without them. CI installs all three and sets
+//! `PLAYOUT_TOOLS_REQUIRED`, which turns that skip into a failure — otherwise a
+//! broken tool install leaves the whole harness a green no-op.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -26,27 +28,43 @@ static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 macro_rules! serial_or_skip {
     () => {
         let _guard = SERIAL.lock().await;
-        if !tools_available() {
-            eprintln!("skipping: mediamtx / nats-server / gst-launch-1.0 not all on PATH");
+        let missing = missing_tools();
+        if !missing.is_empty() {
+            // Skipping is the right answer on a laptop without the tools, and
+            // the wrong one in CI: there the whole harness would stop asserting
+            // and still report green. PLAYOUT_TOOLS_REQUIRED marks the
+            // environments that installed the tools on purpose.
+            assert!(
+                std::env::var_os("PLAYOUT_TOOLS_REQUIRED").is_none(),
+                "PLAYOUT_TOOLS_REQUIRED is set, so the behavior harness must run, \
+                 but these are not on PATH: {missing:?}"
+            );
+            eprintln!("skipping: not on PATH: {missing:?}");
             return;
         }
     };
 }
 
-fn tools_available() -> bool {
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        ["mediamtx", "nats-server", "gst-launch-1.0"]
-            .iter()
-            .all(|bin| {
-                Command::new(bin)
-                    .arg("--version")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok()
-            })
-    })
+/// Which of the harness's external tools are absent; empty when all are
+/// present. `--version` on each: every one of them exits promptly on it, so
+/// spawnability is the signal and nothing is left running.
+fn missing_tools() -> &'static [&'static str] {
+    static MISSING: OnceLock<Vec<&'static str>> = OnceLock::new();
+    MISSING
+        .get_or_init(|| {
+            ["mediamtx", "nats-server", "gst-launch-1.0"]
+                .into_iter()
+                .filter(|bin| {
+                    Command::new(bin)
+                        .arg("--version")
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .is_err()
+                })
+                .collect()
+        })
+        .as_slice()
 }
 
 fn free_port() -> u16 {
@@ -133,6 +151,21 @@ fn corrupt_corpus() -> &'static Path {
             std::fs::copy(corpus().join(name), dir.join(name)).unwrap();
         }
         std::fs::write(dir.join("clip_bad.mp4"), b"this is not an mp4").unwrap();
+        dir
+    })
+}
+
+/// A corpus where every `.mp4` is garbage — the deployment fault that must
+/// crash-loop visibly rather than spin through recovery forever.
+fn all_bad_corpus() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("playout-parity-allbad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in CLIPS {
+            std::fs::write(dir.join(name), b"this is not an mp4").unwrap();
+        }
         dir
     })
 }
@@ -348,6 +381,54 @@ async fn publish_command(port: u16, platform: &str, verb: &str, payload: &str) {
     client.flush().await.expect("flushing command");
 }
 
+/// Wait for a lastplayed publish, then for it to change — the playhead the
+/// console map reads is moving, not frozen at whatever it booted on.
+async fn wait_ticker_advances(port: u16, platform: &str) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let first = loop {
+        if let Some(v) = read_lastplayed(port, platform).await {
+            break v;
+        }
+        assert!(Instant::now() < deadline, "no ticker publish within 15s");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    assert!(CLIPS.contains(&first.0.as_str()));
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(next) = read_lastplayed(port, platform).await
+            && next != first
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ticker did not advance within 15s"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Every clip in the corpus shows up within a couple of cycles — with 2s clips
+/// that holds no matter which clip the cold boot picked. Returns how long it
+/// took, so a caller can tell realtime playback from a pipeline racing ahead.
+fn wait_all_clips_seen(http: u16, what: &str) -> Duration {
+    let started = Instant::now();
+    let mut seen = std::collections::HashSet::new();
+    wait_for(
+        what,
+        Duration::from_secs(3 * CLIP_SECONDS * CLIPS.len() as u64),
+        || {
+            let c = current(http);
+            if !c.is_empty() {
+                seen.insert(c);
+            }
+            (seen.len() == CLIPS.len()).then_some(())
+        },
+    );
+    started.elapsed()
+}
+
 fn clip_after(name: &str, steps: usize) -> &'static str {
     let i = CLIPS.iter().position(|c| *c == name).expect("known clip");
     CLIPS[(i + steps) % CLIPS.len()]
@@ -511,17 +592,38 @@ async fn boundaries_advance_and_wrap() {
     let p = start_playout(corpus(), Some(nport), mport, "youtube");
     wait_ready(p.http);
 
-    let mut seen = std::collections::HashSet::new();
-    wait_for(
-        "all clips to play through boundaries",
-        Duration::from_secs(3 * CLIP_SECONDS * CLIPS.len() as u64),
-        || {
-            let c = current(p.http);
-            if !c.is_empty() {
-                seen.insert(c);
-            }
-            (seen.len() == CLIPS.len()).then_some(())
-        },
+    wait_all_clips_seen(p.http, "all clips to play through boundaries");
+}
+
+/// The console's chat-map mode: the MediaMTX relay is parked (its Deployment
+/// scaled to 0) and playout is expected to stay up map-only — a fakesink in
+/// place of the RTSP publish, so the pipeline still reaches PLAYING and the
+/// playhead the console map reads keeps advancing while nothing leaves the pod.
+///
+/// No relay exists here at all, so reaching readiness at all discriminates the
+/// modes: had boot wired the encode branch instead, rtspclientsink would have
+/// failed to connect and taken the pipeline down.
+#[tokio::test]
+async fn map_only_plays_and_advances_without_a_relay() {
+    serial_or_skip!();
+    let (_nats, nport) = start_nats();
+    // A port nothing listens on: relay_up's connect is refused, so boot picks
+    // the map-only pipeline.
+    let p = start_playout(corpus(), Some(nport), free_port(), "youtube");
+    wait_ready(p.http);
+
+    let elapsed = wait_all_clips_seen(p.http, "clips to advance with no relay to publish to");
+    wait_ticker_advances(nport, "youtube").await;
+
+    // With no sink pacing the pipeline to the clock, a map-only fakesink
+    // consumes the corpus as fast as it decodes and the playhead the console
+    // map reads flies across the country. Crossing two clip boundaries can't
+    // beat one clip's duration in realtime; without `sync` it takes well under
+    // a second.
+    assert!(
+        elapsed >= Duration::from_secs(CLIP_SECONDS),
+        "map-only playback raced through {} clips in {elapsed:?}; the fakesink is not clock-paced",
+        CLIPS.len()
     );
 }
 
@@ -580,6 +682,58 @@ async fn resume_into_corrupt_clip_recovers() {
     assert!(CLIPS.contains(&cur.as_str()), "landed on {cur:?}");
 }
 
+/// Per-clip recovery is bounded: once consecutive failures outrun the playlist
+/// the whole corpus is bad, which is a deployment fault, not a clip to skip.
+/// Exit non-zero and let the pod crash-loop where it can be seen — the failure
+/// mode this replaces is respawning garbage bins at full tilt forever, which
+/// looks like a healthy process and airs nothing.
+#[tokio::test]
+async fn an_entirely_bad_corpus_gives_up_instead_of_spinning() {
+    serial_or_skip!();
+    let (_nats, nport) = start_nats();
+    let (_mtx, mport) = start_mediamtx();
+    let mut p = start_playout(all_bad_corpus(), Some(nport), mport, "youtube");
+
+    // Readiness never comes here, so wait on the exit rather than on /health.
+    let status = wait_for("playout to give up", Duration::from_secs(30), || {
+        p.proc.0.try_wait().unwrap()
+    });
+    assert!(
+        !status.success(),
+        "an unplayable corpus exited {status:?}; k8s would read that as a clean stop"
+    );
+}
+
+/// The control plane is best-effort: with no NATS reachable playout can't be
+/// commanded and can't resume its exact spot, but it must still loop the corpus
+/// on air. A boot that waits on NATS forever, or gives up without it, takes the
+/// stream down over a dependency that isn't on the playback path.
+#[tokio::test]
+async fn no_nats_still_plays_the_corpus() {
+    serial_or_skip!();
+    let (_mtx, mport) = start_mediamtx();
+    let p = start_playout(corpus(), None, mport, "youtube");
+
+    // An unreachable NATS costs three serial 10s timeouts before the first clip
+    // spawns — the connect window, then the stream-ensure, then the resume read,
+    // the last two guaranteed to time out because the window already concluded
+    // there is no connection. Measured at 31s to readiness, so the usual 30s
+    // budget is too tight. The number is the point: this is dead air on every
+    // restart while NATS is down, and worth shortening.
+    wait_for(
+        "readiness with no control plane",
+        Duration::from_secs(90),
+        || matches!(http_get(p.http, "/health/ready"), Some((200, _))).then_some(()),
+    );
+
+    wait_all_clips_seen(p.http, "clips to advance with no control plane");
+    wait_for(
+        "MediaMTX path to have a publisher",
+        Duration::from_secs(10),
+        || describe_ok(&p.rtsp_url).then_some(()),
+    );
+}
+
 /// The lastplayed ticker keeps the JetStream last-value cache advancing while
 /// playing.
 #[tokio::test]
@@ -590,29 +744,7 @@ async fn lastplayed_ticker_advances() {
     let p = start_playout(corpus(), Some(nport), mport, "youtube");
     wait_ready(p.http);
 
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let first = loop {
-        if let Some(v) = read_lastplayed(nport, "youtube").await {
-            break v;
-        }
-        assert!(Instant::now() < deadline, "no ticker publish within 15s");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    };
-    assert!(CLIPS.contains(&first.0.as_str()));
-
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(next) = read_lastplayed(nport, "youtube").await
-            && next != first
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "ticker did not advance within 15s"
-        );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    wait_ticker_advances(nport, "youtube").await;
 }
 
 /// ENCODER=passthrough splices the compressed corpus straight to MediaMTX —
@@ -631,18 +763,7 @@ async fn passthrough_publishes_and_splices_boundaries() {
         Duration::from_secs(10),
         || describe_ok(&p.rtsp_url).then_some(()),
     );
-    let mut seen = std::collections::HashSet::new();
-    wait_for(
-        "all clips to splice through passthrough boundaries",
-        Duration::from_secs(3 * CLIP_SECONDS * CLIPS.len() as u64),
-        || {
-            let c = current(p.http);
-            if !c.is_empty() {
-                seen.insert(c);
-            }
-            (seen.len() == CLIPS.len()).then_some(())
-        },
-    );
+    wait_all_clips_seen(p.http, "all clips to splice through passthrough boundaries");
 }
 
 /// Passthrough resume seeks a compressed clip via keyframe snapping.

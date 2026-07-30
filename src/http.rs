@@ -101,8 +101,20 @@ mod tests {
     #[test]
     fn version_json_matches_contract() {
         let v = version_json();
-        assert!(v["tag"].as_str().is_some_and(|t| !t.is_empty()));
-        assert!(v["sha"].as_str().is_some_and(|s| !s.is_empty()));
-        assert!(v["built_at"].as_str().is_some_and(|b| !b.is_empty()));
+        // The key names are the contract — the fleet's version discovery reads
+        // these three and nothing else, so a rename here is a breaking change
+        // even though every value would still be non-empty.
+        let obj = v.as_object().expect("/version is a JSON object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["built_at", "sha", "tag"]);
+        // Every field is a non-empty string in every build, release or local:
+        // the consts fall back to the crate version and "unknown".
+        for key in keys {
+            assert!(
+                v[key].as_str().is_some_and(|s| !s.is_empty()),
+                "{key} is not a non-empty string"
+            );
+        }
     }
 }

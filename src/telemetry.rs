@@ -186,3 +186,44 @@ pub fn spawn_recorder(player: SharedPlayer) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_headers;
+
+    #[test]
+    fn parse_headers_reads_the_grafana_cloud_secret_shape() {
+        // What the grafana-cloud-otlp secret actually ships: one Authorization
+        // header whose base64 value carries both `=` padding and its own
+        // internal `=`. Splitting on the LAST `=`, or splitting on every one,
+        // would truncate the credential into a silent 401.
+        assert_eq!(
+            parse_headers("Authorization=Basic MTIzNDU2OnRva2Vu=="),
+            [("Authorization".into(), "Basic MTIzNDU2OnRva2Vu==".into())]
+        );
+
+        // Several headers, and the surrounding whitespace an env var picks up.
+        assert_eq!(
+            parse_headers(" X-Scope-OrgID = 42 ,Authorization=Bearer abc "),
+            [
+                ("X-Scope-OrgID".into(), "42".into()),
+                ("Authorization".into(), "Bearer abc".into()),
+            ]
+        );
+
+        // Unset OTEL_EXPORTER_OTLP_HEADERS reaches here as "" (the caller
+        // defaults it), which must mean "no headers", not one empty header.
+        assert!(parse_headers("").is_empty());
+
+        // An entry with no `=` is dropped rather than becoming a valueless
+        // header. That is the intended shape, but it means a typo'd secret
+        // exports unauthenticated instead of failing loudly — the metrics just
+        // stop arriving. Pinned here so the trade-off is a choice, not a
+        // surprise.
+        assert!(parse_headers("Authorization").is_empty());
+        assert_eq!(
+            parse_headers("garbage,Authorization=Bearer abc"),
+            [("Authorization".into(), "Bearer abc".into())]
+        );
+    }
+}
