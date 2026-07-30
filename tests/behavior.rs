@@ -714,15 +714,15 @@ async fn no_nats_still_plays_the_corpus() {
     let (_mtx, mport) = start_mediamtx();
     let p = start_playout(corpus(), None, mport, "youtube");
 
-    // An unreachable NATS costs three serial 10s timeouts before the first clip
-    // spawns — the connect window, then the stream-ensure, then the resume read,
-    // the last two guaranteed to time out because the window already concluded
-    // there is no connection. Measured at 31s to readiness, so the usual 30s
-    // budget is too tight. The number is the point: this is dead air on every
-    // restart while NATS is down, and worth shortening.
+    // An unreachable NATS costs one deliberate 10s connect window before the
+    // first clip spawns — the window buys a resume when NATS is merely slow to
+    // come up. Measured at 11.6s to readiness. The budget is deliberately close
+    // to that: the stream-ensure and the resume read used to add a guaranteed
+    // 10s timeout each on this path, and a budget with room for them to come
+    // back would let that regress silently into 30s of dead air per restart.
     wait_for(
         "readiness with no control plane",
-        Duration::from_secs(90),
+        Duration::from_secs(20),
         || matches!(http_get(p.http, "/health/ready"), Some((200, _))).then_some(()),
     );
 
