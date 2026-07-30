@@ -106,7 +106,6 @@ pub async fn connect(env: String, platform: String, url: String) -> Option<Contr
     // once NATS recovers.
     wait_for_connect(&client, Duration::from_secs(10)).await;
 
-    let js = jetstream::new(client.clone());
     // Idempotent: the stream outlives any single instance, so most boots find
     // it already declared. A config mismatch just logs — the stream still
     // exists, so publishes to its subject are captured either way.
@@ -116,9 +115,20 @@ pub async fn connect(env: String, platform: String, url: String) -> Option<Contr
         max_messages_per_subject: 1,
         ..Default::default()
     };
-    if let Err(e) = js.create_stream(cfg).await {
-        warn!(err = %e, "ensure lastplayed stream failed");
-    }
+    // Declaring the stream is a JetStream round-trip, so it must not sit on the
+    // boot path: against an unreachable server the request only burns its own
+    // timeout, delaying first frame by that much for a stream nobody can read
+    // yet. Hand it to a task that waits for a connection first — boot proceeds
+    // either way, and the stream is still declared the moment NATS appears.
+    let ensure = client.clone();
+    tokio::spawn(async move {
+        while ensure.connection_state() != async_nats::connection::State::Connected {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        if let Err(e) = jetstream::new(ensure).create_stream(cfg).await {
+            warn!(err = %e, "ensure lastplayed stream failed");
+        }
+    });
     Some(Control {
         client,
         env,
@@ -150,6 +160,14 @@ impl Control {
     /// before restart, mapped to a playlist index. None when there's nothing to
     /// resume or the clip has since left the corpus.
     pub async fn resume_target(&self, player: &SharedPlayer) -> Option<(usize, i64)> {
+        // The startup window above has already settled whether NATS answers. If
+        // it doesn't, a JetStream read here would spend its whole timeout
+        // discovering that again — on the boot path, ahead of first frame — and
+        // there is nothing to resume from either way.
+        if self.client.connection_state() != async_nats::connection::State::Connected {
+            warn!("nats not connected; skipping resume, starting on a random clip");
+            return None;
+        }
         let js = jetstream::new(self.client.clone());
         let stream = js.get_stream(LASTPLAYED_STREAM).await.ok()?;
         let msg = stream
