@@ -1,13 +1,33 @@
 version: 2
 updates:
+  # Minor and patch bumps batch into one PR per ecosystem. A major is left out
+  # of every group so a breaking change arrives on its own, attributable to a
+  # single dependency instead of hiding among a dozen safe ones. Security
+  # updates ignore groups entirely and always arrive alone.
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
+    groups:
+      rust:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "async-nats"
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: docker
     directory: /
     schedule:
