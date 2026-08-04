@@ -1,5 +1,12 @@
 version: 2
 updates:
+  # Bumps carry no user-facing change, so they never need a towncrier changelog
+  # fragment. Self-apply skip-changelog so the changelog gate's existing label
+  # escape hatch exempts them — this keeps the enforcement workflow bot-agnostic
+  # (it survives a future move off Dependabot without a workflow edit). Note:
+  # setting `labels` replaces Dependabot's defaults, so the otherwise-automatic
+  # dependencies/ecosystem labels are restated here.
+  #
   # Minor and patch bumps batch into one PR per ecosystem. A major is left out
   # of every group so a breaking change arrives on its own, attributable to a
   # single dependency instead of hiding among a dozen safe ones. Security
@@ -17,6 +24,10 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - dependencies
+      - rust
+      - skip-changelog
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -28,7 +39,15 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - dependencies
+      - github_actions
+      - skip-changelog
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    labels:
+      - dependencies
+      - docker
+      - skip-changelog
