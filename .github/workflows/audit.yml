@@ -1,0 +1,32 @@
+name: audit
+
+# RustSec advisory scan of Cargo.lock — the Rust counterpart of tripbot's
+# govulncheck. Runs on PRs/main for changed deps, plus a weekly cron because
+# advisories land against already-pinned versions independent of any commit
+# (scheduled failures file an issue instead of failing a check).
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '0 12 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
