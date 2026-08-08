@@ -58,6 +58,9 @@ class EnvConfig:
     # publishes the corpus's compressed H.264 without re-encoding — needs
     # every clip on the uniform corpus spec)
     encoder: str = "x264enc"
+    # ponytail: no env sets this while prod runs `passthrough` (no encode, no
+    # iGPU), but the knob and its resource request stay so a future env with
+    # spare iGPU headroom can switch to VAAPI encode by flipping one flag.
     gpu: bool = False  # request gpu.intel.com/i915 (VAAPI encode)
     cpu_request: str = "500m"
     priority_class: str = ""  # prod-stream on prod; "" elsewhere

@@ -226,6 +226,8 @@ class PlayoutInstance(Construct):
         mem_limit = "1Gi" if env.encoder == "passthrough" else "4Gi"
         requests: dict[str, str] = {"cpu": env.cpu_request, "memory": "512Mi"}
         limits: dict[str, str] = {"memory": mem_limit}
+        # ponytail: dormant while every env encodes `passthrough` — kept for the
+        # VAAPI encode path, see EnvConfig.gpu.
         if env.gpu:
             requests["gpu.intel.com/i915"] = "1"
             limits["gpu.intel.com/i915"] = "1"
