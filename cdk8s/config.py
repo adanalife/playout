@@ -36,6 +36,19 @@ def _load_supported_platforms() -> tuple[str, ...]:
 
 SUPPORTED_PLATFORMS = _load_supported_platforms()
 
+# The canonical service-name / port / env-key vocabulary the fleet shares, owned
+# by tripbot (generated from its pkg/contract Go constants) and synced into this
+# repo's contract.json via `task contract:sync`. playout's Service name is what
+# tripbot's VLC_SERVER_HOST dials, so it comes from here rather than being
+# restated. Never hand-edit contract.json — change the Go constants + re-sync.
+_CONTRACT_FILE = Path(__file__).resolve().parents[1] / "contract.json"
+
+with _CONTRACT_FILE.open() as _f:
+    _CONTRACT = json.load(_f)
+
+SERVICES: dict[str, str] = _CONTRACT["services"]
+PORTS: dict[str, int] = _CONTRACT["ports"]
+
 
 @dataclass(frozen=True)
 class EnvConfig:
