@@ -1,0 +1,1 @@
+`playout_output_frame_gaps_total`'s exported description says DTS, matching what the probe has actually keyed off since 0.11.3. The doc comment was corrected earlier, but the description is a string literal that ships in the binary and reaches Grafana's metric browser, where it still claimed PTS.
