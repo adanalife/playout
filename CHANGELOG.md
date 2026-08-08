@@ -2,6 +2,27 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.16.0] — 2026-08-08
+
+### Changed
+
+- cdk8s now reads playout's Service name and HTTP port from `contract.json`, synced from tripbot via `task contract:sync`, instead of restating them by hand. A CI gate asserts the synced copy matches tripbot main. ([#123](https://github.com/adanalife/playout/pull/123))
+- cdk8s now reads the per-platform MediaMTX relay's Service name and RTSP port from `contract.json` instead of building them by hand. Rendered manifests are unchanged. ([#126](https://github.com/adanalife/playout/pull/126))
+
+### Fixed
+
+- `playout_output_frame_gaps_total`'s exported description says DTS, matching what the probe has actually keyed off since 0.11.3. The doc comment was corrected earlier, but the description is a string literal that ships in the binary and reaches Grafana's metric browser, where it still claimed PTS. ([#118](https://github.com/adanalife/playout/pull/118))
+- Set `runAsNonRoot` on the PreSync image gate pod, so it conforms to the `restricted` PodSecurity profile the pinned namespaces run. ([#122](https://github.com/adanalife/playout/pull/122))
+
+### CI / Tooling
+
+- Cache the GStreamer apt install and the pinned MediaMTX/NATS release tarballs in the test job. The ~160-package install was the job's least predictable step — 28s on a good day, 83s on a bad one, and once the full 30-minute timeout with zero tests run — and a warm cache now leaves the job with no network fetches at all. ([#106](https://github.com/adanalife/playout/pull/106))
+- The release-please workflow can be triggered manually, so a release branch left on an old base by chore-only merges can be rebased off current `main` without waiting for the next releasable commit. ([#125](https://github.com/adanalife/playout/pull/125))
+
+### Misc
+
+- Re-sync `contract.json` from tripbot main, which now carries the per-platform MediaMTX service names and the RTSP port. ([#124](https://github.com/adanalife/playout/pull/124))
+
 ## [v0.15.3] — 2026-07-30
 
 ### Fixed
