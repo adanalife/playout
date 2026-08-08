@@ -120,6 +120,10 @@ fn make_encode_branch(encoder_name: &str, rtsp_url: &str) -> Result<Vec<gst::Ele
     Ok(vec![queue, encoder, parse, sink])
 }
 
+/// Local preview branch: render decoded video to a desktop window instead of
+/// publishing it. ponytail: this and the `OUTPUT=window|both` arms stay wired in
+/// every build so eyeballing the pipeline on a laptop is an env var away, never a
+/// recompile. Deployed envs all publish RTSP, so nothing sets it there.
 fn make_window_branch() -> Result<Vec<gst::Element>> {
     let queue = gst::ElementFactory::make("queue").build()?;
     let convert = gst::ElementFactory::make("videoconvert").build()?;
