@@ -27,11 +27,6 @@ PART_OF = "tripbot"
 CONFIG_HASH_ANNOTATION = "adanalife.dev/config-hash"
 HTTP_PORT = PORTS["vlc_http"]  # the binary's HTTP_PORT default
 
-# The per-platform MediaMTX relay playout publishes into. Hand-declared: the
-# relay is the infra repo's construct and no generated contract carries its
-# name or port.
-MEDIAMTX_RTSP_PORT = 8554
-
 # Multi-arch image carrying the `crane` CLI, used by the PreSync image gate to
 # probe the registry. gcr.io (not Docker Hub) — the CI base-image-mirror policy
 # doesn't apply to a runtime cluster pull.
@@ -197,7 +192,10 @@ class PlayoutInstance(Construct):
             # Publish into the per-platform MediaMTX relay (same namespace);
             # OBS reads from MediaMTX, so playout restarts never invalidate
             # the OBS-facing endpoint.
-            "RTSP_URL": f"rtsp://mediamtx-{platform}:{MEDIAMTX_RTSP_PORT}/dashcam",
+            "RTSP_URL": (
+                f"rtsp://{SERVICES[f'mediamtx_{platform}']}:"
+                f"{PORTS['mediamtx_rtsp']}/dashcam"
+            ),
             # Control plane: NATS commands + lastplayed resume. NATS runs in the
             # <env>-platform namespace.
             "NATS_URL": f"nats://nats.{env.name}-platform.svc.cluster.local:4222",
