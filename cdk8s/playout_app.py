@@ -196,9 +196,13 @@ class PlayoutInstance(Construct):
                 f"rtsp://{SERVICES[f'mediamtx_{platform}']}:"
                 f"{PORTS['mediamtx_rtsp']}/dashcam"
             ),
-            # Control plane: NATS commands + lastplayed resume. NATS runs in the
-            # <env>-platform namespace.
-            "NATS_URL": f"nats://nats.{env.name}-platform.svc.cluster.local:4222",
+            # Control plane: NATS commands + lastplayed resume. The Service name
+            # and port are contract vocabulary; the <env>-platform namespace it
+            # runs in is env topology and stays here.
+            "NATS_URL": (
+                f"nats://{SERVICES['nats']}.{env.name}-platform"
+                f".svc.cluster.local:{PORTS['nats']}"
+            ),
             "ENV": env.nats_env,
             "STREAM_PLATFORM": platform,
             # deployment.environment OTLP label = the k8s namespace (prod-1 /
