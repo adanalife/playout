@@ -1,0 +1,1 @@
+cdk8s now reads playout's Service name and HTTP port from `contract.json`, synced from tripbot via `task contract:sync`, instead of restating them by hand. A CI gate asserts the synced copy matches tripbot main.
