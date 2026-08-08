@@ -92,7 +92,7 @@ pub static OUTPUT_FRAMES: LazyLock<Counter<u64>> = LazyLock::new(|| {
 pub static OUTPUT_FRAME_GAPS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter("playout")
         .u64_counter("playout_output_frame_gaps_total")
-        .with_description("Output frames whose PTS jumped >1.5 frame intervals past the previous one (visible stalls/drops)")
+        .with_description("Output frames whose DTS jumped >1.5 frame intervals past the previous one (visible stalls/drops)")
         .build()
 });
 
