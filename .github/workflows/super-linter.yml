@@ -11,6 +11,9 @@ on:
 
 permissions:
   contents: read
+  # super-linter posts a commit status per linter; without this the API call
+  # 403s and every one of them is dropped.
+  statuses: write
 
 jobs:
   build:
