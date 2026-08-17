@@ -31,6 +31,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No PR diff to scope to on a schedule — lint the whole tree.
           VALIDATE_ALL_CODEBASE: true
+          # Scheduled main runs have no PR to attach per-linter commit statuses
+          # to, and the read-only token can't create them anyway.
+          MULTI_STATUS: false
           ENABLE_GITHUB_PULL_REQUEST_SUMMARY_COMMENT: false
           # Excluded paths:
           #   - cdk8s/dist/: synth output, golden-gated by the pr-gates synth
