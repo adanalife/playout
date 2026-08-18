@@ -1,0 +1,3 @@
+[codespell]
+# unparseable: a legitimate spelling (src/player.rs); codespell wants "unparsable".
+ignore-words-list = unparseable

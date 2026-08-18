@@ -4,9 +4,14 @@
   "packages": {
     ".": {
       "release-type": "rust",
+      "skip-changelog": true,
       "extra-files": [
         "cdk8s/versions.yaml",
-        "cdk8s/dist/prod-1-playout-youtube.k8s.yaml"
+        {
+          "type": "generic",
+          "path": "cdk8s/dist/prod-1-playout-*.k8s.yaml",
+          "glob": true
+        }
       ]
     }
   }
