@@ -1,6 +1,6 @@
-use std::hash::{BuildHasher, Hasher};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,25 +8,79 @@ use anyhow::{Context, Result, bail};
 use gst::glib;
 use gst::prelude::*;
 use gstreamer as gst;
+use tokio::signal::unix::{SignalKind, signal};
+use tracing::{error, info, warn};
 
 mod http;
 mod nats;
+mod player;
+mod telemetry;
+mod watchdog;
+
+use player::{Player, SharedPlayer};
+
+/// Build identity served at /version (the fleet-wide version-discovery
+/// contract). Release images stamp VERSION/SHA via Docker build-args and
+/// BUILT_AT at image build; plain cargo builds fall back to the crate version.
+pub const VERSION: &str = match option_env!("VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+pub const SHA: &str = match option_env!("SHA") {
+    Some(s) => s,
+    None => "unknown",
+};
+pub const BUILT_AT: &str = match option_env!("BUILT_AT") {
+    Some(t) => t,
+    None => "unknown",
+};
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// The deploy-env id (`prod-1` / `stage-1`) the fleet partitions telemetry by —
+/// both the Sentry environment tag and the `deployment.environment` OTLP label.
+/// Distinct from `ENV`, which is the NATS subject env (`production` /
+/// `staging`) and only stands in for local runs.
+fn deployment_env() -> String {
+    env_or("DEPLOYMENT_ENVIRONMENT", &env_or("ENV", "development"))
+}
+
+/// Whether a deploy env reports to Sentry. Only prod does: stage runs the same
+/// binary against parked platforms and upstreams that are routinely absent, so
+/// its errors describe the environment rather than a defect, and they'd spend a
+/// shared event budget saying so. Stage errors still reach Loki and the
+/// dashboards, which is where a stage question gets answered anyway.
+fn sends_to_sentry(deploy_env: &str) -> bool {
+    deploy_env == "prod-1"
+}
+
+/// Recursively collect the `.mp4` files (case-insensitive) under `dir`,
+/// sorted by full path. Today's corpus is flat, but the scan must not
+/// silently miss a subdir the day one appears. An empty corpus is a
+/// deployment fault: bail loudly and let the pod crash-loop rather than
+/// publish a dead stream.
 fn scan_video_dir(dir: &str) -> Result<Vec<PathBuf>> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .with_context(|| format!("reading VIDEO_DIR {dir}"))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
+    let mut files = Vec::new();
+    let mut dirs = vec![PathBuf::from(dir)];
+    while let Some(d) = dirs.pop() {
+        for entry in
+            std::fs::read_dir(&d).with_context(|| format!("reading VIDEO_DIR {}", d.display()))?
+        {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path
+                .extension()
                 .and_then(|e| e.to_str())
                 .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
-        })
-        .collect();
+            {
+                files.push(path);
+            }
+        }
+    }
     files.sort();
     if files.is_empty() {
         bail!("no .mp4 files found in {dir}");
@@ -36,8 +90,24 @@ fn scan_video_dir(dir: &str) -> Result<Vec<PathBuf>> {
 
 /// The encode branch ends in an RTSP RECORD publish to MediaMTX; consumers
 /// attach to MediaMTX, so this end can restart without them noticing.
+///
+/// ENCODER=passthrough publishes the corpus clips' compressed H.264 without
+/// re-encoding — the airing corpus is transcoded to one uniform spec
+/// (identical params, IDR-leading closed GOPs), which is what makes splicing
+/// compressed streams safe. h264parse re-sends SPS/PPS at every IDR so each
+/// splice and every late joiner resyncs.
 fn make_encode_branch(encoder_name: &str, rtsp_url: &str) -> Result<Vec<gst::Element>> {
     let queue = gst::ElementFactory::make("queue").build()?;
+    let parse = gst::ElementFactory::make("h264parse").build()?;
+    // Re-send SPS/PPS with every IDR so late joiners always sync.
+    parse.set_property("config-interval", -1i32);
+    let sink = gst::ElementFactory::make("rtspclientsink").build()?;
+    sink.set_property("location", rtsp_url);
+
+    if encoder_name == "passthrough" {
+        return Ok(vec![queue, parse, sink]);
+    }
+
     let encoder = gst::ElementFactory::make(encoder_name)
         .build()
         .with_context(|| format!("creating encoder {encoder_name}"))?;
@@ -47,15 +117,13 @@ fn make_encode_branch(encoder_name: &str, rtsp_url: &str) -> Result<Vec<gst::Ele
         encoder.set_property("key-int-max", 120u32);
         encoder.set_property_from_str("speed-preset", "veryfast");
     }
-    let parse = gst::ElementFactory::make("h264parse").build()?;
-    // Re-send SPS/PPS with every IDR so late joiners always sync.
-    parse.set_property("config-interval", -1i32);
-    let sink = gst::ElementFactory::make("rtspclientsink").build()?;
-    sink.set_property("location", rtsp_url);
-
     Ok(vec![queue, encoder, parse, sink])
 }
 
+/// Local preview branch: render decoded video to a desktop window instead of
+/// publishing it. ponytail: this and the `OUTPUT=window|both` arms stay wired in
+/// every build so eyeballing the pipeline on a laptop is an env var away, never a
+/// recompile. Deployed envs all publish RTSP, so nothing sets it there.
 fn make_window_branch() -> Result<Vec<gst::Element>> {
     let queue = gst::ElementFactory::make("queue").build()?;
     let convert = gst::ElementFactory::make("videoconvert").build()?;
@@ -63,286 +131,67 @@ fn make_window_branch() -> Result<Vec<gst::Element>> {
     Ok(vec![queue, convert, sink])
 }
 
-/// A live decode bin plus the bookkeeping a playback command needs: which
-/// playlist entry it is, the concat pad it feeds, the offset it started at,
-/// and the output running time it went active (for the playhead position).
-struct Clip {
-    bin: gst::Element,
-    /// concat sink pad, set once the decode bin exposes its src pad.
-    pad: Option<gst::Pad>,
-    index: usize,
-    /// Seek offset this clip started at, ms (0 = top of clip).
-    offset_ms: i64,
-    /// Output running time when this clip became active; None until promoted.
-    start_rt: Option<gst::ClockTime>,
+/// Map-only sink: swallow the stream at real time and broadcast nothing. Used
+/// in place of the RTSP publish when the MediaMTX relay is parked (the console's
+/// chat-map mode scales the relay to 0 without restarting playout). `sync=true`
+/// paces the sink to the buffer clock, so the pipeline still reaches PLAYING and
+/// advances the running-time the NATS playhead reports — which is what drives
+/// the console map — while nothing leaves the pod. fakesink is format-agnostic,
+/// so it takes the passthrough H.264 or the decoded path equally.
+fn make_fakesink_branch() -> Result<Vec<gst::Element>> {
+    let queue = gst::ElementFactory::make("queue").build()?;
+    let sink = gst::ElementFactory::make("fakesink").build()?;
+    sink.set_property("sync", true);
+    Ok(vec![queue, sink])
 }
 
-/// Everything the clip-spawning path needs to hang on to. Clip bins come and
-/// go at every boundary; the pipeline, concat, and playlist live forever.
-struct Player {
-    pipeline: gst::Pipeline,
-    concat: gst::Element,
-    /// Immutable playlist, sorted. Commands index into this.
-    files: Vec<PathBuf>,
-    /// Live clip bins in play order: `[active, prerolled-next]`.
-    clips: Mutex<Vec<Clip>>,
+/// One output frame is a "gap" when its timestamp lands more than
+/// `threshold_ns` after the previous frame's — a visible stall or drop. The
+/// caller feeds DTS (monotonic in decode order), so a jump means a late frame,
+/// not B-frame PTS reordering. `prev_ns == u64::MAX` is the "no previous frame
+/// yet" sentinel (first buffer never counts).
+fn is_frame_gap(prev_ns: u64, ts_ns: u64, threshold_ns: u64) -> bool {
+    prev_ns != u64::MAX && ts_ns > prev_ns.saturating_add(threshold_ns)
 }
 
-type SharedPlayer = Arc<Player>;
-
-/// Playlist index `n` clips forward of `active`, wrapping. n<1 is treated as 1.
-fn skip_index(active: usize, n: i32, len: usize) -> usize {
-    (active + (n.max(1) as usize)) % len
-}
-
-/// Playlist index `n` clips back of `active`, wrapping. n<1 is treated as 1.
-fn back_index(active: usize, n: i32, len: usize) -> usize {
-    let n = (n.max(1) as usize) % len;
-    (active + len - n) % len
-}
-
-impl Player {
-    fn uri_at(&self, index: usize) -> String {
-        format!("file://{}", self.files[index].display())
-    }
-
-    fn basename_at(&self, index: usize) -> String {
-        self.files[index]
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_owned()
-    }
-
-    /// Playlist index of the clip whose basename matches `name`, if any.
-    fn find(&self, name: &str) -> Option<usize> {
-        self.files
-            .iter()
-            .position(|p| p.file_name().and_then(|n| n.to_str()) == Some(name))
-    }
-
-    // ponytail: stdlib RNG via RandomState's seeded hasher — good enough to
-    // pick a clip, no `rand` crate. Upgrade to `rand` only if distribution
-    // quality ever matters here (it won't for "play a random dashcam clip").
-    fn random_index(&self) -> usize {
-        let r = std::collections::hash_map::RandomState::new()
-            .build_hasher()
-            .finish();
-        (r % self.files.len() as u64) as usize
-    }
-
-    fn active_index(&self) -> usize {
-        self.clips
-            .lock()
-            .unwrap()
-            .first()
-            .map(|c| c.index)
-            .unwrap_or(0)
-    }
-
-    /// Add a decode bin for playlist `index` and link it into concat. The new
-    /// clip prerolls immediately but its buffers block in concat until every
-    /// earlier pad has finished — that blocking is what makes the splice
-    /// gapless. On EOS the bin tears itself down and spawns the successor, so
-    /// the pipeline always holds the active clip plus the prerolled next.
-    /// `offset_ms` seeks the clip before concat reaches it (play.at / resume).
-    fn spawn(self: &Arc<Self>, index: usize, offset_ms: i64) {
-        let uri = self.uri_at(index);
-        println!("spawning [{index}] {uri} (offset {offset_ms}ms)");
-        let decode = gst::ElementFactory::make("uridecodebin3")
-            .property("uri", &uri)
-            .build()
-            .expect("creating uridecodebin3");
-
-        // Video only: audio is composited downstream in OBS, and deselecting
-        // here keeps clips with/without audio tracks topology-identical.
-        decode.connect("select-stream", false, |args| {
-            let stream = args[2].get::<gst::Stream>().unwrap();
-            let selected = stream.stream_type().contains(gst::StreamType::VIDEO);
-            Some((selected as i32).to_value())
-        });
-
-        let player = Arc::clone(self);
-        decode.connect_pad_added(move |decode, pad| {
-            let sinkpad = player
-                .concat
-                .request_pad_simple("sink_%u")
-                .expect("requesting concat pad");
-            pad.link(&sinkpad).expect("linking clip into concat");
-
-            // Record the pad so a command can release it when redirecting.
-            if let Some(clip) = player
-                .clips
-                .lock()
-                .unwrap()
-                .iter_mut()
-                .find(|c| &c.bin == decode)
-            {
-                clip.pad = Some(sinkpad.clone());
-            }
-
-            // Best-effort seek for play.at / resume: position the source before
-            // concat switches to it. A refused seek falls back to top-of-clip.
-            // ponytail: the mid-stream seek path needs a stage soak — it can't
-            // be exercised without the corpus + a live pipeline.
-            if offset_ms > 0 {
-                let pos = gst::ClockTime::from_mseconds(offset_ms as u64);
-                if decode
-                    .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE, pos)
-                    .is_err()
-                {
-                    eprintln!("seek to {offset_ms}ms refused; starting clip at top");
-                }
-            }
-
-            // EOS on this pad = clip finished and concat has moved on: tear
-            // down the finished bin off the streaming thread and top up.
-            let player = Arc::clone(&player);
-            let decode = decode.clone();
-            sinkpad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
-                let Some(ev) = info.event() else {
-                    return gst::PadProbeReturn::Ok;
-                };
-                if ev.type_() != gst::EventType::Eos {
-                    return gst::PadProbeReturn::Ok;
-                }
-                let player = Arc::clone(&player);
-                let decode = decode.clone();
-                let pad = pad.clone();
-                glib::idle_add_once(move || player.on_clip_eos(&decode, &pad));
-                // Drop the EOS: concat handles pad switching itself, and the
-                // pipeline-level EOS must never fire (24/7 stream).
-                gst::PadProbeReturn::Drop
-            });
-        });
-
-        self.pipeline.add(&decode).expect("adding clip bin");
-        decode.sync_state_with_parent().expect("starting clip bin");
-        self.clips.lock().unwrap().push(Clip {
-            bin: decode,
-            pad: None,
-            index,
-            offset_ms,
-            start_rt: None,
-        });
-    }
-
-    /// Natural boundary: the finished bin's EOS reached concat, which has
-    /// already switched to the prerolled clip. Tear the finished bin down,
-    /// stamp the promoted clip active, and preroll its sequential successor.
-    fn on_clip_eos(self: &Arc<Self>, decode: &gst::Element, pad: &gst::Pad) {
-        self.clips.lock().unwrap().retain(|c| &c.bin != decode);
-        decode.set_state(gst::State::Null).ok();
-        self.pipeline.remove(decode).ok();
-        self.concat.release_request_pad(pad);
-        self.mark_active();
-        let next = self
-            .clips
-            .lock()
-            .unwrap()
-            .first()
-            .map(|c| (c.index + 1) % self.files.len());
-        if let Some(next) = next {
-            self.spawn(next, 0);
-        }
-    }
-
-    /// Stamp the current active clip (clips[0]) with the output running time it
-    /// went live, so the playhead can report position within the clip.
-    fn mark_active(&self) {
-        let rt = self.pipeline.query_position::<gst::ClockTime>();
-        if let Some(active) = self.clips.lock().unwrap().first_mut() {
-            active.start_rt = rt.or(Some(gst::ClockTime::ZERO));
-        }
-    }
-
-    /// Tear down the prerolled clip(s) behind the active one, releasing their
-    /// concat pads — so a following `spawn` becomes concat's next pad.
-    fn teardown_preroll(&self) {
-        let extra: Vec<Clip> = self.clips.lock().unwrap().drain(1..).collect();
-        for c in extra {
-            c.bin.set_state(gst::State::Null).ok();
-            self.pipeline.remove(&c.bin).ok();
-            if let Some(pad) = c.pad {
-                self.concat.release_request_pad(&pad);
-            }
-        }
-    }
-
-    /// Redirect playback to `index` (optionally seeked): swap it in as the
-    /// prerolled clip, then finish the active clip so concat cuts straight to
-    /// it through the same long-lived encoder.
-    fn play_index(self: &Arc<Self>, index: usize, offset_ms: i64) {
-        self.teardown_preroll();
-        self.spawn(index, offset_ms);
-        self.jump();
-    }
-
-    fn play_random(self: &Arc<Self>) {
-        self.play_index(self.random_index(), 0);
-    }
-
-    fn play_file(self: &Arc<Self>, name: &str) {
-        match self.find(name) {
-            Some(i) => self.play_index(i, 0),
-            None => eprintln!("play.file: {name} not in playlist"),
-        }
-    }
-
-    fn play_at(self: &Arc<Self>, name: &str, position_ms: i64) {
-        match self.find(name) {
-            Some(i) => self.play_index(i, position_ms),
-            None => eprintln!("play.at: {name} not in playlist"),
-        }
-    }
-
-    fn skip(self: &Arc<Self>, n: i32) {
-        let i = skip_index(self.active_index(), n, self.files.len());
-        self.play_index(i, 0);
-    }
-
-    fn back(self: &Arc<Self>, n: i32) {
-        let i = back_index(self.active_index(), n, self.files.len());
-        self.play_index(i, 0);
-    }
-
-    /// The stdin `j` analogue: finish the active clip *now*. Its EOS probe
-    /// promotes the already-prerolled next clip through the same long-lived
-    /// encoder — same mechanism as a natural boundary.
-    fn jump(&self) {
-        let active = self.clips.lock().unwrap().first().map(|c| c.bin.clone());
-        if let Some(active) = active {
-            active.send_event(gst::event::Eos::new());
-        }
-    }
-
-    /// Basename of the active clip (`2018_0704_120000.MP4`), matching what
-    /// vlc-server reports over `/vlc/current`. None when nothing is playing.
-    fn current_basename(&self) -> Option<String> {
-        let index = self.clips.lock().unwrap().first()?.index;
-        Some(self.basename_at(index))
-    }
-
-    /// Current clip basename + playback position (ms) for the lastplayed
-    /// last-value cache. Position = start offset + time since the clip went
-    /// active; falls back to the offset alone before the pipeline reports one.
-    fn playhead(&self) -> Option<(String, i64)> {
-        let clips = self.clips.lock().unwrap();
-        let active = clips.first()?;
-        let basename = self.basename_at(active.index);
-        let now = self.pipeline.query_position::<gst::ClockTime>();
-        let position_ms = match (now, active.start_rt) {
-            (Some(now), Some(start)) => {
-                active.offset_ms + (now.mseconds() as i64 - start.mseconds() as i64).max(0)
-            }
-            _ => active.offset_ms,
-        };
-        Some((basename, position_ms))
-    }
+fn main() -> Result<()> {
+    // Reads SENTRY_DSN from the environment; unset (local runs) leaves the
+    // client disabled. The environment tag carries the deploy-env id so
+    // playout's issues filter alongside the rest of the fleet's. Skipping init
+    // entirely is what silences a non-sending env — leaving the DSN out of
+    // ClientOptions wouldn't, since apply_defaults reads SENTRY_DSN itself.
+    // Init precedes the tokio runtime so the transport thread outlives every
+    // worker, and the guard lives to the end of main so it flushes on exit.
+    let deploy_env = deployment_env();
+    let _sentry = sends_to_sentry(&deploy_env).then(|| {
+        sentry::init(sentry::ClientOptions {
+            release: Some(format!("playout@{VERSION}").into()),
+            environment: Some(deploy_env.clone().into()),
+            ..Default::default()
+        })
+    });
+    // One binary serves per-platform deployments (playout-youtube,
+    // playout-twitch) sharing one Sentry project; the `platform` tag makes
+    // twitch vs youtube errors filterable within it, matching the Go fleet.
+    let platform = env_or("STREAM_PLATFORM", "youtube");
+    sentry::configure_scope(|scope| scope.set_tag("platform", &platform));
+    run()
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        // ERROR events become Sentry events; WARN/INFO attach as breadcrumbs.
+        .with(sentry_tracing::layer())
+        .init();
+    info!(version = VERSION, sha = SHA, "playout starting");
+
     let video_dir = env_or("VIDEO_DIR", "/opt/data/Dashcam/_all");
     let output = env_or("OUTPUT", "rtsp"); // rtsp | window | both
     let rtsp_url = env_or("RTSP_URL", "rtsp://localhost:8554/dashcam");
@@ -350,13 +199,25 @@ async fn main() -> Result<()> {
     let nats_env = env_or("ENV", "development");
     let platform = env_or("STREAM_PLATFORM", "youtube");
     let nats_url = env_or("NATS_URL", "nats://localhost:4222");
+    // The k8s namespace, so playout's series share the dashboards' env filter
+    // with the Go fleet's.
+    let deployment_env = deployment_env();
+
+    let meter_provider = telemetry::init(&platform, &deployment_env);
 
     let files = scan_video_dir(&video_dir)?;
-    println!(
-        "playout {}: {} clips in {video_dir}, output={output} encoder={encoder_name}",
-        env!("CARGO_PKG_VERSION"),
-        files.len(),
+    info!(
+        clips = files.len(),
+        video_dir = %video_dir,
+        output = %output,
+        encoder = %encoder_name,
+        "playlist ready"
     );
+
+    let passthrough = encoder_name == "passthrough";
+    if passthrough && output != "rtsp" {
+        bail!("OUTPUT={output} needs decoded video; ENCODER=passthrough supports only rtsp");
+    }
 
     gst::init()?;
     let pipeline = gst::Pipeline::new();
@@ -365,34 +226,90 @@ async fn main() -> Result<()> {
     // it rewrites each clip's segment so downstream running time never
     // resets, which is exactly what the encoder needs to stay unbroken.
     let concat = gst::ElementFactory::make("concat").build()?;
-    let q1 = gst::ElementFactory::make("queue").build()?;
-    let convert = gst::ElementFactory::make("videoconvert").build()?;
-    let q2 = gst::ElementFactory::make("queue").build()?;
-    let scale = gst::ElementFactory::make("videoscale").build()?;
-    let q3 = gst::ElementFactory::make("queue").build()?;
-    let rate = gst::ElementFactory::make("videorate").build()?;
-    let q4 = gst::ElementFactory::make("queue").build()?;
-    let caps = gst::ElementFactory::make("capsfilter").build()?;
-    caps.set_property(
-        "caps",
-        gst::Caps::builder("video/x-raw")
-            .field("width", 1920i32)
-            .field("height", 1080i32)
-            .field("framerate", gst::Fraction::new(60, 1))
-            .build(),
-    );
     let tee = gst::ElementFactory::make("tee").build()?;
 
-    pipeline.add_many([
-        &concat, &q1, &convert, &q2, &scale, &q3, &rate, &q4, &caps, &tee,
-    ])?;
-    gst::Element::link_many([
-        &concat, &q1, &convert, &q2, &scale, &q3, &rate, &q4, &caps, &tee,
-    ])?;
+    // Output-frame telemetry, tapped once at the tee's sink pad — upstream of
+    // the branch split, so it counts frames regardless of how many outputs are
+    // wired. Every buffer here is one frame: raw video in the decoded path,
+    // one parsed H.264 access unit in passthrough. rate(playout_output_frames_total)
+    // is the true output fps. A timestamp jump past the gap threshold is a frame
+    // the viewer saw stall or drop — concat keeps running time continuous across
+    // splices, so a gap means a real hitch, not a boundary.
+    // Gap detection keys off DTS: in passthrough the buffers arrive in decode
+    // order, where PTS is non-monotonic (B-frame reorder) and would false-fire
+    // on every reordered frame — DTS is monotonic, so a jump is a genuine late
+    // frame. Raw video carries no DTS, so dts_or_pts falls back to PTS, which
+    // is already in presentation order there.
+    // ponytail: thresholds hard-coded for the corpus's fixed 1080p60; derive
+    // from the caps framerate if playout ever runs a non-60 stream.
+    const FRAME_INTERVAL_NS: u64 = 1_000_000_000 / 60;
+    const GAP_THRESHOLD_NS: u64 = FRAME_INTERVAL_NS * 3 / 2;
+    let last_ts = AtomicU64::new(u64::MAX);
+    tee.static_pad("sink")
+        .expect("tee always has a static sink pad")
+        .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            if let Some(gst::PadProbeData::Buffer(ref buf)) = info.data {
+                telemetry::OUTPUT_FRAMES.add(1, telemetry::attrs());
+                if let Some(ts) = buf.dts_or_pts() {
+                    let prev = last_ts.swap(ts.nseconds(), Ordering::Relaxed);
+                    if is_frame_gap(prev, ts.nseconds(), GAP_THRESHOLD_NS) {
+                        telemetry::OUTPUT_FRAME_GAPS.add(1, telemetry::attrs());
+                    }
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+
+    if passthrough {
+        // Compressed splice: no raw-video processing exists to normalize
+        // clips, so the corpus contract (uniform 1080p60, closed GOPs) is
+        // the spec enforcement — a non-spec clip changes caps mid-stream.
+        let q1 = gst::ElementFactory::make("queue").build()?;
+        pipeline.add_many([&concat, &q1, &tee])?;
+        gst::Element::link_many([&concat, &q1, &tee])?;
+    } else {
+        let q1 = gst::ElementFactory::make("queue").build()?;
+        let convert = gst::ElementFactory::make("videoconvert").build()?;
+        let q2 = gst::ElementFactory::make("queue").build()?;
+        let scale = gst::ElementFactory::make("videoscale").build()?;
+        let q3 = gst::ElementFactory::make("queue").build()?;
+        let rate = gst::ElementFactory::make("videorate").build()?;
+        let q4 = gst::ElementFactory::make("queue").build()?;
+        let caps = gst::ElementFactory::make("capsfilter").build()?;
+        caps.set_property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("width", 1920i32)
+                .field("height", 1080i32)
+                .field("framerate", gst::Fraction::new(60, 1))
+                .build(),
+        );
+        pipeline.add_many([
+            &concat, &q1, &convert, &q2, &scale, &q3, &rate, &q4, &caps, &tee,
+        ])?;
+        gst::Element::link_many([
+            &concat, &q1, &convert, &q2, &scale, &q3, &rate, &q4, &caps, &tee,
+        ])?;
+    }
+
+    // With an RTSP OUTPUT the sink we wire depends on whether the MediaMTX relay
+    // is actually up. In dark/live the relay is scaled up and we publish (the
+    // broadcast path). In chat-map the relay is parked — the console scales it
+    // to 0 without restarting playout — so publishing would fail the pipeline;
+    // instead we run a fakesink, keeping the pipeline playing so the console map
+    // still advances off the NATS playhead. The relay-state monitor below
+    // restarts us to reconfigure when that reachability flips either way.
+    let publish = output == "rtsp" || output == "both";
+    let broadcasting = publish && watchdog::relay_up(&rtsp_url).await;
 
     let mut branches = Vec::new();
-    if output == "rtsp" || output == "both" {
-        branches.push(make_encode_branch(&encoder_name, &rtsp_url)?);
+    if publish {
+        if broadcasting {
+            branches.push(make_encode_branch(&encoder_name, &rtsp_url)?);
+        } else {
+            info!(rtsp_url = %rtsp_url, "relay unreachable; running map-only (no broadcast)");
+            branches.push(make_fakesink_branch()?);
+        }
     }
     if output == "window" || output == "both" {
         branches.push(make_window_branch()?);
@@ -412,6 +329,9 @@ async fn main() -> Result<()> {
         concat,
         files,
         clips: Mutex::new(Vec::new()),
+        passthrough,
+        recoveries: AtomicUsize::new(0),
+        durations: Mutex::new(HashMap::new()),
     });
 
     // Control plane is best-effort: if NATS is down, playout still loops the
@@ -425,10 +345,13 @@ async fn main() -> Result<()> {
     };
 
     // Active clip + prerolled next; every EOS tops the pair back up.
-    let (first, offset) = resume.unwrap_or((0, 0));
+    // Cold boot (no resume state) starts on a random clip; otherwise every
+    // clean deploy replays the same first clip on stream.
+    let (first, offset) = resume.unwrap_or_else(|| (player.random_index(), 0));
     player.spawn(first, offset);
     player.spawn((first + 1) % player.files.len(), 0);
 
+    telemetry::spawn_recorder(player.clone());
     tokio::spawn(http::run(player.clone()));
     if let Some(control) = control {
         tokio::spawn(control.clone().run_commands(player.clone()));
@@ -455,26 +378,53 @@ async fn main() -> Result<()> {
         }
     });
 
+    // k8s stops the pod with SIGTERM: quit the main loop so the pipeline
+    // drops to Null below, which tears down the RTSP publish cleanly.
+    let loop_signal = main_loop.clone();
+    tokio::spawn(async move {
+        let mut term = signal(SignalKind::terminate()).expect("installing SIGTERM handler");
+        let mut int = signal(SignalKind::interrupt()).expect("installing SIGINT handler");
+        tokio::select! {
+            _ = term.recv() => info!("SIGTERM received, shutting down"),
+            _ = int.recv() => info!("SIGINT received, shutting down"),
+        }
+        loop_signal.quit();
+    });
+
     let failed = Arc::new(AtomicBool::new(false));
+    // Set by the map-only relay-return monitor: signals a clean exit (0) so k8s
+    // restarts us into the broadcast configuration, distinct from `failed`.
+    let reconfigure = Arc::new(AtomicBool::new(false));
     let loop_clone = main_loop.clone();
     let failed_clone = failed.clone();
+    let player_bus = Arc::clone(&player);
     let bus = pipeline.bus().unwrap();
     let _watch = bus.add_watch(move |_, msg| {
         match msg.view() {
             gst::MessageView::Error(err) => {
-                eprintln!(
-                    "error from {}: {} ({:?})",
-                    err.src().map(|s| s.path_string()).unwrap_or_default(),
-                    err.error(),
-                    err.debug(),
-                );
-                failed_clone.store(true, Ordering::SeqCst);
-                loop_clone.quit();
+                let src = err.src().map(|s| s.path_string()).unwrap_or_default();
+                if err.src().is_some_and(|s| player_bus.on_clip_error(s)) {
+                    warn!(
+                        src = %src,
+                        err = %err.error(),
+                        debug = ?err.debug(),
+                        "clip error absorbed"
+                    );
+                } else {
+                    error!(
+                        src = %src,
+                        err = %err.error(),
+                        debug = ?err.debug(),
+                        "pipeline error"
+                    );
+                    failed_clone.store(true, Ordering::SeqCst);
+                    loop_clone.quit();
+                }
             }
             gst::MessageView::Eos(_) => {
                 // Clip EOS is dropped at the concat pads; this should be
                 // unreachable for a 24/7 stream.
-                eprintln!("unexpected end of stream");
+                error!("unexpected end of stream");
                 failed_clone.store(true, Ordering::SeqCst);
                 loop_clone.quit();
             }
@@ -483,11 +433,42 @@ async fn main() -> Result<()> {
         glib::ControlFlow::Continue
     })?;
 
+    // Relay-state guards, live only for an RTSP OUTPUT:
+    // - broadcasting: the DESCRIBE watchdog exits non-zero if the publish dies,
+    //   so k8s restarts us — and if the relay stays down we come back up
+    //   map-only rather than crash-looping.
+    // - map-only: watch for the relay returning and exit cleanly to rebuild
+    //   with the publish wired in.
+    // The window-only local mode has no relay to watch.
+    if broadcasting {
+        let wd_failed = failed.clone();
+        let wd_loop = main_loop.clone();
+        tokio::spawn(watchdog::run(rtsp_url.clone(), move || {
+            wd_failed.store(true, Ordering::SeqCst);
+            wd_loop.quit();
+        }));
+    } else if publish {
+        let rc = reconfigure.clone();
+        let rc_loop = main_loop.clone();
+        tokio::spawn(watchdog::run_reappear(rtsp_url.clone(), move || {
+            rc.store(true, Ordering::SeqCst);
+            rc_loop.quit();
+        }));
+    }
+
     pipeline.set_state(gst::State::Playing)?;
     player.mark_active();
     main_loop.run();
     pipeline.set_state(gst::State::Null)?;
 
+    if let Some(provider) = meter_provider {
+        let _ = provider.shutdown();
+    }
+
+    if reconfigure.load(Ordering::SeqCst) {
+        info!("relay returned; exiting cleanly to restart in broadcast mode");
+        return Ok(());
+    }
     if failed.load(Ordering::SeqCst) {
         bail!("pipeline failed");
     }
@@ -496,22 +477,52 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{back_index, skip_index};
+    use super::{is_frame_gap, scan_video_dir, sends_to_sentry};
 
     #[test]
-    fn skip_wraps_and_floors_to_one() {
-        assert_eq!(skip_index(0, 1, 5), 1);
-        assert_eq!(skip_index(3, 3, 5), 1); // 3+3=6 % 5
-        assert_eq!(skip_index(4, 1, 5), 0); // wrap
-        assert_eq!(skip_index(2, 0, 5), 3); // n<1 treated as 1
-        assert_eq!(skip_index(2, -4, 5), 3);
+    fn only_prod_reports_to_sentry() {
+        assert!(sends_to_sentry("prod-1"));
+        assert!(!sends_to_sentry("stage-1"));
+        assert!(!sends_to_sentry("development"));
+        // The NATS subject env is not a deploy-env id — if the tag ever
+        // regresses to it, this env must not start sending.
+        assert!(!sends_to_sentry("production"));
     }
 
     #[test]
-    fn back_wraps_and_floors_to_one() {
-        assert_eq!(back_index(1, 1, 5), 0);
-        assert_eq!(back_index(0, 1, 5), 4); // wrap
-        assert_eq!(back_index(2, 3, 5), 4); // 2-3 mod 5
-        assert_eq!(back_index(3, 0, 5), 2); // n<1 treated as 1
+    fn frame_gap_detection() {
+        let interval = 1_000_000_000u64 / 60; // 16.67ms
+        let threshold = interval * 3 / 2;
+        assert!(!is_frame_gap(u64::MAX, 12345, threshold)); // first buffer
+        assert!(!is_frame_gap(0, interval, threshold)); // steady 60fps step
+        // Either side of the threshold: the widest step that is still not a gap,
+        // and the narrowest one that is. A drifting comparison shows up here
+        // before it shows up as a miscounted stall on the dashboard.
+        assert!(!is_frame_gap(0, threshold, threshold));
+        assert!(is_frame_gap(0, threshold + 1, threshold));
+        assert!(is_frame_gap(0, interval * 2, threshold)); // a frame missing
+        assert!(!is_frame_gap(interval * 5, interval * 4, threshold)); // non-increasing timestamp
+        // Late frames near the u64 ceiling must not wrap into a false negative.
+        assert!(!is_frame_gap(u64::MAX - 1, u64::MAX, threshold));
+    }
+
+    #[test]
+    fn scan_walks_subdirs_case_insensitively() {
+        let root = std::env::temp_dir().join(format!("playout-scan-test-{}", std::process::id()));
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join("a.MP4"), b"").unwrap();
+        std::fs::write(sub.join("b.mp4"), b"").unwrap();
+        std::fs::write(sub.join("notes.txt"), b"").unwrap();
+
+        let files = scan_video_dir(root.to_str().unwrap()).unwrap();
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["a.MP4", "b.mp4"]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(scan_video_dir(root.to_str().unwrap()).is_err());
     }
 }

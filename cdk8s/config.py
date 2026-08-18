@@ -6,6 +6,7 @@ deployment needs — the same shape as the obs repo's config.py.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -20,6 +21,35 @@ def _versions() -> dict:
     return yaml.safe_load(_VERSIONS_FILE.read_text()) or {}
 
 
+# The fleet-wide supported-platform set, owned by platform-gateway (its Go
+# adapter registry is the source of truth) and synced into this repo's
+# platforms.json via `task platforms:sync`. It's what every env's `platforms`
+# is set from. Never hand-edit platforms.json — add an adapter in the gateway
+# + re-sync.
+_PLATFORMS_FILE = Path(__file__).resolve().parents[1] / "platforms.json"
+
+
+def _load_supported_platforms() -> tuple[str, ...]:
+    with _PLATFORMS_FILE.open() as f:
+        return tuple(json.load(f)["platforms"])
+
+
+SUPPORTED_PLATFORMS = _load_supported_platforms()
+
+# The canonical service-name / port / env-key vocabulary the fleet shares, owned
+# by tripbot (generated from its pkg/contract Go constants) and synced into this
+# repo's contract.json via `task contract:sync`. playout's Service name is what
+# tripbot's VLC_SERVER_HOST dials, so it comes from here rather than being
+# restated. Never hand-edit contract.json — change the Go constants + re-sync.
+_CONTRACT_FILE = Path(__file__).resolve().parents[1] / "contract.json"
+
+with _CONTRACT_FILE.open() as _f:
+    _CONTRACT = json.load(_f)
+
+SERVICES: dict[str, str] = _CONTRACT["services"]
+PORTS: dict[str, int] = _CONTRACT["ports"]
+
+
 @dataclass(frozen=True)
 class EnvConfig:
     name: str
@@ -27,18 +57,23 @@ class EnvConfig:
     image_tag: str  # floating tag (main) for components without a pin
 
     # tripbot env token in the NATS command subjects (tripbot.<nats_env>.vlc.*),
-    # matching what vlc-server and cmd/tripbot use — NOT the k8s env name.
+    # matching what cmd/tripbot publishes — NOT the k8s env name.
     nats_env: str = "development"
 
-    # Platform instances to render. The A/B phase runs youtube only (the
-    # unwatched stream); twitch joins at cutover.
+    # Platform instances to render.
     platforms: tuple[str, ...] = ("youtube",)
 
     # Which PVC holds the dashcam corpus: the NFS-backed `vlc-dashcam` or the
-    # node-local copy `vlc-dashcam-local` (same claims vlc-server mounts).
+    # node-local copy `vlc-dashcam-local`.
     dashcam_claim: str = "vlc-dashcam"
 
-    encoder: str = "x264enc"  # x264enc | vah264enc (VAAPI — needs gpu)
+    # x264enc | vah264enc (VAAPI — needs gpu) | passthrough (stream-copy;
+    # publishes the corpus's compressed H.264 without re-encoding — needs
+    # every clip on the uniform corpus spec)
+    encoder: str = "x264enc"
+    # ponytail: no env sets this while prod runs `passthrough` (no encode, no
+    # iGPU), but the knob and its resource request stay so a future env with
+    # spare iGPU headroom can switch to VAAPI encode by flipping one flag.
     gpu: bool = False  # request gpu.intel.com/i915 (VAAPI encode)
     cpu_request: str = "500m"
     priority_class: str = ""  # prod-stream on prod; "" elsewhere
@@ -49,8 +84,14 @@ class EnvConfig:
 
     def pull_policy_for(self, component: str) -> str:
         """Pinned tags are immutable → IfNotPresent; floating tags → Always."""
-        pinned = component in _versions().get(self.name, {})
-        return "IfNotPresent" if pinned else "Always"
+        return "IfNotPresent" if self.is_pinned(component) else "Always"
+
+    def is_pinned(self, component: str) -> bool:
+        """True when this env deploys an immutable release tag (from
+        versions.yaml) rather than the floating tag. A pinned tag can be a
+        brand-new version whose image isn't built yet — the case the PreSync
+        image gate guards."""
+        return component in _versions().get(self.name, {})
 
 
 ENVS: dict[str, EnvConfig] = {
@@ -58,25 +99,30 @@ ENVS: dict[str, EnvConfig] = {
         name="prod-1",
         namespace="prod-1",
         nats_env="production",
+        # Every supported platform synthesizes an instance, born parked at
+        # replicas:0; a console scale-up brings one live and sticks (Argo ignores
+        # .spec.replicas, so which platforms are live is runtime state, not
+        # git state). Parking frees the instance's CPU request on the minipc.
+        platforms=SUPPORTED_PLATFORMS,
         image_tag="latest",  # overridden by the versions.yaml pin
         dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
         cpu_request="2",
         priority_class="prod-stream",
-        encoder="vah264enc",
-        gpu=True,
+        # Stream-copy the uniform corpus straight to MediaMTX. x264 is
+        # disqualified here: it can't hold 1080p60 realtime on this box
+        # (2026-07-14 youtube A/B, 2026-07-15 twitch runaway).
+        encoder="passthrough",
     ),
     "stage-1": EnvConfig(
         name="stage-1",
         namespace="stage-1",
         nats_env="staging",
         image_tag="main",
-        # Mirror prod's encode path and CFS weight so the stage realtime soak
-        # transfers: VAAPI on the shared iGPU, same CPU request. The i915 claim
-        # also pins the pod to the minipc (the rpi5 advertises no i915) and is
-        # counted by stage-1's co-tenant ResourceQuota, so scaling up too many
-        # stage claimants parks pods Pending instead of degrading prod.
+        # Same as prod: one instance per supported platform, born parked, brought
+        # live by a console scale-up.
+        platforms=SUPPORTED_PLATFORMS,
+        # Same encode mode as prod so the stage soak transfers.
         cpu_request="2",
-        encoder="vah264enc",
-        gpu=True,
+        encoder="passthrough",
     ),
 }

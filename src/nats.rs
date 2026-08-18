@@ -1,8 +1,9 @@
-//! Control plane, wire-compatible with tripbot's libvlc vlc-server so nothing
-//! upstream changes at cutover. Commands arrive over **core NATS** (fire-and-
-//! forget, `tripbot.<env>.vlc.<verb>`); the currently-playing clip and playback
-//! position flow back through the `TRIPBOT_VLC_LASTPLAYED` JetStream last-value
-//! cache, which a restarted instance reads to resume where it left off.
+//! Control plane. Commands arrive over **core NATS** (fire-and-forget,
+//! `tripbot.<env>.vlc.<verb>.<platform>`); the currently-playing clip and
+//! playback position flow back through the `TRIPBOT_VLC_LASTPLAYED` JetStream
+//! last-value cache, which a restarted instance reads to resume where it left
+//! off. The `vlc` subject token and stream name are the wire contract tripbot's
+//! playout-client speaks — the names outlived the libvlc server they came from.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,10 +13,11 @@ use futures::StreamExt;
 use gst::glib;
 use gstreamer as gst;
 use serde::Deserialize;
+use tracing::{info, warn};
 
 use crate::SharedPlayer;
 
-/// JetStream stream vlc-server declares for the lastplayed last-value cache.
+/// JetStream stream backing the lastplayed last-value cache.
 const LASTPLAYED_STREAM: &str = "TRIPBOT_VLC_LASTPLAYED";
 
 fn subject(env: &str, verb: &str) -> String {
@@ -43,6 +45,12 @@ struct NArg {
 }
 
 #[derive(Deserialize)]
+struct DeltaArg {
+    #[serde(default)]
+    delta_ms: i64,
+}
+
+#[derive(Deserialize)]
 struct LastPlayed {
     file: String,
     #[serde(default)]
@@ -55,35 +63,92 @@ pub struct Control {
     platform: String,
 }
 
-/// Connect to NATS and ensure the lastplayed stream exists. Returns None if the
-/// connection fails — the caller then runs without a control plane rather than
-/// aborting the stream.
+/// Connect to NATS and ensure the lastplayed stream exists. Returns None only
+/// on a non-retryable config error; a server that's merely unreachable yields a
+/// client that keeps dialing in the background (`retry_on_initial_connect`).
+///
+/// That retry covers the boot-race where a node reboot brings NATS up alongside
+/// playout — without it the control plane stays dead for the life of the
+/// process. The command subscriptions queue client-side and flush the moment
+/// NATS answers, and `playout_nats_connected` tracks the live state via the
+/// event callback so the gap is visible on the dashboard.
 pub async fn connect(env: String, platform: String, url: String) -> Option<Control> {
-    let client = match async_nats::connect(&url).await {
+    let client = match async_nats::ConnectOptions::new()
+        .retry_on_initial_connect()
+        .event_callback(|event| async move {
+            match event {
+                async_nats::Event::Connected => {
+                    info!("nats connected");
+                    crate::telemetry::set_nats_connected(true);
+                }
+                async_nats::Event::Disconnected => {
+                    warn!("nats disconnected; control plane paused until reconnect");
+                    crate::telemetry::set_nats_connected(false);
+                }
+                _ => {}
+            }
+        })
+        .connect(&url)
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("nats connect failed ({url}): {e}; control plane disabled");
+            warn!(err = %e, url = %url, "nats connect failed; control plane disabled");
             return None;
         }
     };
-    let js = jetstream::new(client.clone());
-    // Idempotent: vlc-server may already have declared this with the same
-    // config. A mismatch just logs — the stream still exists, so publishes to
-    // its subject are captured either way.
+
+    // retry_on_initial_connect returns before the first handshake completes, so
+    // wait a bounded spell for it here — otherwise the resume read below races
+    // the connection and every boot cold-starts on a random clip. If NATS is
+    // genuinely down the wait times out and we proceed anyway: resume is skipped
+    // this boot, but the queued subscriptions still wire the control plane up
+    // once NATS recovers.
+    wait_for_connect(&client, Duration::from_secs(10)).await;
+
+    // Idempotent: the stream outlives any single instance, so most boots find
+    // it already declared. A config mismatch just logs — the stream still
+    // exists, so publishes to its subject are captured either way.
     let cfg = jetstream::stream::Config {
         name: LASTPLAYED_STREAM.to_string(),
         subjects: vec![format!("{}.*", subject(&env, "lastplayed"))],
         max_messages_per_subject: 1,
         ..Default::default()
     };
-    if let Err(e) = js.create_stream(cfg).await {
-        eprintln!("ensure lastplayed stream failed: {e}");
-    }
+    // Declaring the stream is a JetStream round-trip, so it must not sit on the
+    // boot path: against an unreachable server the request only burns its own
+    // timeout, delaying first frame by that much for a stream nobody can read
+    // yet. Hand it to a task that waits for a connection first — boot proceeds
+    // either way, and the stream is still declared the moment NATS appears.
+    let ensure = client.clone();
+    tokio::spawn(async move {
+        while ensure.connection_state() != async_nats::connection::State::Connected {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        if let Err(e) = jetstream::new(ensure).create_stream(cfg).await {
+            warn!(err = %e, "ensure lastplayed stream failed");
+        }
+    });
     Some(Control {
         client,
         env,
         platform,
     })
+}
+
+/// Poll the client's connection state until it's connected or `timeout`
+/// elapses. Used right after `retry_on_initial_connect` so the startup resume
+/// read lands on a live connection when NATS is merely slow to come up, without
+/// blocking the stream indefinitely when it's down for good.
+async fn wait_for_connect(client: &async_nats::Client, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while client.connection_state() != async_nats::connection::State::Connected {
+        if tokio::time::Instant::now() >= deadline {
+            warn!("nats not connected within startup window; resume may cold-start");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 impl Control {
@@ -95,6 +160,14 @@ impl Control {
     /// before restart, mapped to a playlist index. None when there's nothing to
     /// resume or the clip has since left the corpus.
     pub async fn resume_target(&self, player: &SharedPlayer) -> Option<(usize, i64)> {
+        // The startup window above has already settled whether NATS answers. If
+        // it doesn't, a JetStream read here would spend its whole timeout
+        // discovering that again — on the boot path, ahead of first frame — and
+        // there is nothing to resume from either way.
+        if self.client.connection_state() != async_nats::connection::State::Connected {
+            warn!("nats not connected; skipping resume, starting on a random clip");
+            return None;
+        }
         let js = jetstream::new(self.client.clone());
         let stream = js.get_stream(LASTPLAYED_STREAM).await.ok()?;
         let msg = stream
@@ -103,39 +176,80 @@ impl Control {
             .ok()?;
         let ev: LastPlayed = serde_json::from_slice(&msg.payload).ok()?;
         let index = player.find(&ev.file)?;
-        println!("resuming {} at {}ms", ev.file, ev.position_ms);
+        info!(file = %ev.file, position_ms = ev.position_ms, "resuming");
         Some((index, ev.position_ms))
     }
 
     /// Subscribe to the command subjects and dispatch onto the GLib main loop
     /// (`idle_add_once`) so every pipeline mutation is serialized with the
     /// natural-boundary teardown — no cross-thread races on the clip list.
+    ///
+    /// One explicit subscription per verb, each with this instance's platform
+    /// leaf (`tripbot.<env>.vlc.<verb>.<platform>`) — the shape tripbot
+    /// publishes. The leaf keeps platforms isolated: a Twitch-triggered skip
+    /// must never advance the YouTube stream sharing the env's NATS.
     pub async fn run_commands(self: Arc<Self>, player: SharedPlayer) {
+        const VERBS: [&str; 6] = [
+            "play.random",
+            "play.file",
+            "play.at",
+            "skip",
+            "back",
+            "seek",
+        ];
         let base = subject(&self.env, ""); // "tripbot.<env>.vlc."
-        let wildcard = format!("{base}>");
-        let mut sub = match self.client.subscribe(wildcard.clone()).await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("nats subscribe failed: {e}; control plane disabled");
-                return;
+        let mut subs = Vec::new();
+        for verb in VERBS {
+            let subj = format!("{base}{verb}.{}", self.platform);
+            match self.client.subscribe(subj.clone()).await {
+                Ok(s) => subs.push(s),
+                Err(e) => {
+                    warn!(subject = %subj, err = %e, "nats subscribe failed; control plane disabled");
+                    return;
+                }
             }
-        };
-        println!("nats: subscribed to {wildcard}");
-        while let Some(msg) = sub.next().await {
-            let verb = msg
-                .subject
-                .strip_prefix(base.as_str())
-                .unwrap_or("")
-                .to_owned();
+            info!(subject = %subj, "nats subscribed");
+        }
+        let mut merged = futures::stream::select_all(subs);
+        while let Some(msg) = merged.next().await {
+            let Some(verb) = verb_of(msg.subject.as_str(), &base, &self.platform) else {
+                continue;
+            };
+            let verb = verb.to_owned();
             let player = player.clone();
             let payload = msg.payload.clone();
+            // Counted here rather than in `dispatch`: every subject that lands
+            // in this loop is a command, so one increment covers all the verbs
+            // including seek, which takes its own path below.
+            crate::telemetry::COMMANDS.add(
+                1,
+                &crate::telemetry::attrs_with(opentelemetry::KeyValue::new("verb", verb.clone())),
+            );
+            // seek resolves its landing spot before touching the pipeline:
+            // the walk discovers clip durations (file I/O), which must stay
+            // off the GLib main loop that clip teardown shares. Only the
+            // final play_index hops onto it, like every other mutation.
+            if verb == "seek" {
+                let delta_ms = serde_json::from_slice::<DeltaArg>(&payload)
+                    .map(|a| a.delta_ms)
+                    .unwrap_or(0);
+                if delta_ms == 0 {
+                    continue;
+                }
+                tokio::task::spawn_blocking(move || {
+                    let (index, offset_ms) = player.seek_target(delta_ms);
+                    info!(delta_ms, index, offset_ms, "seek");
+                    glib::idle_add_once(move || player.play_index(index, offset_ms));
+                });
+                continue;
+            }
             glib::idle_add_once(move || dispatch(&player, &verb, &payload));
         }
     }
 
     /// Republish the current clip + position every `interval` so the last-value
     /// cache tracks where playback is. Worst case a restart resumes one
-    /// interval behind — matching vlc-server's ticker.
+    /// interval behind.
     pub async fn run_ticker(self: Arc<Self>, player: SharedPlayer, interval: Duration) {
         let subj = self.lastplayed_subject();
         let mut tick = tokio::time::interval(interval);
@@ -144,8 +258,8 @@ impl Control {
             let Some((file, position_ms)) = player.playhead() else {
                 continue;
             };
-            // emitted_at is a debug-only latency field on vlc-server's side and
-            // unused on resume; leave it empty rather than pull in a time-format
+            // emitted_at is a debug-only latency field in the payload contract,
+            // unread on resume; leave it empty rather than pull in a time-format
             // dependency just to stamp it.
             let payload = serde_json::json!({
                 "emitted_at": "",
@@ -156,6 +270,15 @@ impl Control {
             let _ = self.client.publish(subj.clone(), payload.into()).await;
         }
     }
+}
+
+/// Command verb from a full subject: strips the `tripbot.<env>.vlc.` prefix
+/// and this instance's `.<platform>` leaf. None for foreign subjects.
+fn verb_of<'a>(subject: &'a str, base: &str, platform: &str) -> Option<&'a str> {
+    subject
+        .strip_prefix(base)?
+        .strip_suffix(platform)?
+        .strip_suffix('.')
 }
 
 /// Map a command verb + payload to a Player operation. Runs on the main loop.
@@ -184,7 +307,40 @@ fn dispatch(player: &SharedPlayer, verb: &str, payload: &[u8]) {
                 .unwrap_or(1);
             player.back(n);
         }
-        // lastplayed.<platform> (our own publishes) and anything else: ignore.
+        // Unknown verbs: ignore (only the subscribed command subjects arrive).
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verb_of;
+
+    #[test]
+    fn verb_of_strips_base_and_platform_leaf() {
+        let base = "tripbot.production.vlc.";
+        assert_eq!(
+            verb_of(
+                "tripbot.production.vlc.play.random.youtube",
+                base,
+                "youtube"
+            ),
+            Some("play.random")
+        );
+        assert_eq!(
+            verb_of("tripbot.production.vlc.skip.youtube", base, "youtube"),
+            Some("skip")
+        );
+        // Another platform's leaf must not dispatch here.
+        assert_eq!(
+            verb_of("tripbot.production.vlc.skip.twitch", base, "youtube"),
+            None
+        );
+        // Bare verb without a platform leaf is not a command.
+        assert_eq!(
+            verb_of("tripbot.production.vlc.skip", base, "youtube"),
+            None
+        );
+        assert_eq!(verb_of("other.subject", base, "youtube"), None);
     }
 }
