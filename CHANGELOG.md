@@ -2,6 +2,12 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.17.1] — 2026-08-19
+
+### Fixed
+
+- The publish branch no longer sheds frames during a healthy RTSP session. Its leaky queue's default 1s cap sat below rtspclientsink's ~2s steady-state occupancy, dropping roughly half of all frames and leaving every reader (OBS included) decoding constant reference errors — visible as heavy artifacts on the stream. ([#135](https://github.com/adanalife/playout/pull/135))
+
 ## [v0.17.0] — 2026-08-19
 
 ### Changed
