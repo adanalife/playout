@@ -181,11 +181,7 @@ async fn run() -> Result<()> {
     // it rewrites each clip's segment so downstream running time never
     // resets, which is exactly what the encoder needs to stay unbroken.
     let concat = gst::ElementFactory::make("concat").build()?;
-    // allow-not-linked: a publish-slot swap leaves the tee momentarily
-    // branchless, which must drop buffers, not error the pipeline.
-    let tee = gst::ElementFactory::make("tee")
-        .property("allow-not-linked", true)
-        .build()?;
+    let tee = gst::ElementFactory::make("tee").build()?;
 
     // Output-frame telemetry, tapped once at the tee's sink pad — upstream of
     // the branch split, so it counts frames regardless of how many outputs are
@@ -251,14 +247,14 @@ async fn run() -> Result<()> {
         ])?;
     }
 
-    // With an RTSP OUTPUT the publish slot starts on whichever branch the
-    // MediaMTX path allows. Path free: publish immediately (the broadcast
+    // With an RTSP OUTPUT the publish attaches only when the MediaMTX path
+    // allows it. Path free at boot: publish immediately (the broadcast
     // path). Path unavailable — the relay is parked (the console's chat-map
     // mode scales it to 0 without restarting playout), or another playout
-    // still holds the path (a rolling deploy's outgoing pod) — start on the
-    // fakesink, keeping the pipeline playing so the console map still
-    // advances off the NATS playhead, and let the acquirer swap the publish
-    // in the moment the path frees.
+    // still holds the path (a rolling deploy's outgoing pod) — run map-only
+    // on the permanent fakesink, which keeps the pipeline playing so the
+    // console map still advances off the NATS playhead, and let the acquirer
+    // attach the publish the moment the path frees.
     let publish = output == "rtsp" || output == "both";
     if !publish && output != "window" {
         bail!("OUTPUT must be rtsp, window, or both (got {output})");
@@ -278,7 +274,6 @@ async fn run() -> Result<()> {
             out.attach_publish()?;
         } else {
             info!(rtsp_url = %rtsp_url, "publish path unavailable; starting map-only");
-            out.attach_fakesink()?;
             out.wake();
         }
         tokio::spawn(Arc::clone(out).run_acquirer());
