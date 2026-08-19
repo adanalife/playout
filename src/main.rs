@@ -14,6 +14,7 @@ use tracing::{error, info, warn};
 mod http;
 mod nats;
 mod player;
+mod publish;
 mod telemetry;
 mod watchdog;
 
@@ -88,38 +89,6 @@ fn scan_video_dir(dir: &str) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// The encode branch ends in an RTSP RECORD publish to MediaMTX; consumers
-/// attach to MediaMTX, so this end can restart without them noticing.
-///
-/// ENCODER=passthrough publishes the corpus clips' compressed H.264 without
-/// re-encoding — the airing corpus is transcoded to one uniform spec
-/// (identical params, IDR-leading closed GOPs), which is what makes splicing
-/// compressed streams safe. h264parse re-sends SPS/PPS at every IDR so each
-/// splice and every late joiner resyncs.
-fn make_encode_branch(encoder_name: &str, rtsp_url: &str) -> Result<Vec<gst::Element>> {
-    let queue = gst::ElementFactory::make("queue").build()?;
-    let parse = gst::ElementFactory::make("h264parse").build()?;
-    // Re-send SPS/PPS with every IDR so late joiners always sync.
-    parse.set_property("config-interval", -1i32);
-    let sink = gst::ElementFactory::make("rtspclientsink").build()?;
-    sink.set_property("location", rtsp_url);
-
-    if encoder_name == "passthrough" {
-        return Ok(vec![queue, parse, sink]);
-    }
-
-    let encoder = gst::ElementFactory::make(encoder_name)
-        .build()
-        .with_context(|| format!("creating encoder {encoder_name}"))?;
-    if encoder_name == "x264enc" {
-        encoder.set_property("bitrate", 8000u32);
-        // 2s GOP at 60fps, matching the corpus spec the stream runs today.
-        encoder.set_property("key-int-max", 120u32);
-        encoder.set_property_from_str("speed-preset", "veryfast");
-    }
-    Ok(vec![queue, encoder, parse, sink])
-}
-
 /// Local preview branch: render decoded video to a desktop window instead of
 /// publishing it. ponytail: this and the `OUTPUT=window|both` arms stay wired in
 /// every build so eyeballing the pipeline on a laptop is an env var away, never a
@@ -129,20 +98,6 @@ fn make_window_branch() -> Result<Vec<gst::Element>> {
     let convert = gst::ElementFactory::make("videoconvert").build()?;
     let sink = gst::ElementFactory::make("autovideosink").build()?;
     Ok(vec![queue, convert, sink])
-}
-
-/// Map-only sink: swallow the stream at real time and broadcast nothing. Used
-/// in place of the RTSP publish when the MediaMTX relay is parked (the console's
-/// chat-map mode scales the relay to 0 without restarting playout). `sync=true`
-/// paces the sink to the buffer clock, so the pipeline still reaches PLAYING and
-/// advances the running-time the NATS playhead reports — which is what drives
-/// the console map — while nothing leaves the pod. fakesink is format-agnostic,
-/// so it takes the passthrough H.264 or the decoded path equally.
-fn make_fakesink_branch() -> Result<Vec<gst::Element>> {
-    let queue = gst::ElementFactory::make("queue").build()?;
-    let sink = gst::ElementFactory::make("fakesink").build()?;
-    sink.set_property("sync", true);
-    Ok(vec![queue, sink])
 }
 
 /// One output frame is a "gap" when its timestamp lands more than
@@ -292,32 +247,39 @@ async fn run() -> Result<()> {
         ])?;
     }
 
-    // With an RTSP OUTPUT the sink we wire depends on whether the MediaMTX relay
-    // is actually up. In dark/live the relay is scaled up and we publish (the
-    // broadcast path). In chat-map the relay is parked — the console scales it
-    // to 0 without restarting playout — so publishing would fail the pipeline;
-    // instead we run a fakesink, keeping the pipeline playing so the console map
-    // still advances off the NATS playhead. The relay-state monitor below
-    // restarts us to reconfigure when that reachability flips either way.
+    // With an RTSP OUTPUT the publish attaches only when the MediaMTX path
+    // allows it. Path free at boot: publish immediately (the broadcast
+    // path). Path unavailable — the relay is parked (the console's chat-map
+    // mode scales it to 0 without restarting playout), or another playout
+    // still holds the path (a rolling deploy's outgoing pod) — run map-only
+    // on the permanent fakesink, which keeps the pipeline playing so the
+    // console map still advances off the NATS playhead, and let the acquirer
+    // attach the publish the moment the path frees.
     let publish = output == "rtsp" || output == "both";
-    let broadcasting = publish && watchdog::relay_up(&rtsp_url).await;
-
-    let mut branches = Vec::new();
-    if publish {
-        if broadcasting {
-            branches.push(make_encode_branch(&encoder_name, &rtsp_url)?);
-        } else {
-            info!(rtsp_url = %rtsp_url, "relay unreachable; running map-only (no broadcast)");
-            branches.push(make_fakesink_branch()?);
-        }
-    }
-    if output == "window" || output == "both" {
-        branches.push(make_window_branch()?);
-    }
-    if branches.is_empty() {
+    if !publish && output != "window" {
         bail!("OUTPUT must be rtsp, window, or both (got {output})");
     }
-    for branch in &branches {
+    let out = publish
+        .then(|| {
+            publish::Output::new(
+                pipeline.clone(),
+                tee.clone(),
+                encoder_name.clone(),
+                rtsp_url.clone(),
+            )
+        })
+        .transpose()?;
+    if let Some(out) = &out {
+        if watchdog::path_free(&rtsp_url).await {
+            out.attach_publish()?;
+        } else {
+            info!(rtsp_url = %rtsp_url, "publish path unavailable; starting map-only");
+            out.wake();
+        }
+        tokio::spawn(Arc::clone(out).run_acquirer());
+    }
+    if output == "window" || output == "both" {
+        let branch = make_window_branch()?;
         let refs: Vec<&gst::Element> = branch.iter().collect();
         pipeline.add_many(&refs)?;
         gst::Element::link_many(&refs)?;
@@ -392,12 +354,10 @@ async fn run() -> Result<()> {
     });
 
     let failed = Arc::new(AtomicBool::new(false));
-    // Set by the map-only relay-return monitor: signals a clean exit (0) so k8s
-    // restarts us into the broadcast configuration, distinct from `failed`.
-    let reconfigure = Arc::new(AtomicBool::new(false));
     let loop_clone = main_loop.clone();
     let failed_clone = failed.clone();
     let player_bus = Arc::clone(&player);
+    let out_bus = out.clone();
     let bus = pipeline.bus().unwrap();
     let _watch = bus.add_watch(move |_, msg| {
         match msg.view() {
@@ -409,6 +369,16 @@ async fn run() -> Result<()> {
                         err = %err.error(),
                         debug = ?err.debug(),
                         "clip error absorbed"
+                    );
+                } else if err
+                    .src()
+                    .is_some_and(|s| out_bus.as_ref().is_some_and(|o| o.on_error(s)))
+                {
+                    warn!(
+                        src = %src,
+                        err = %err.error(),
+                        debug = ?err.debug(),
+                        "publish error absorbed; map-only until the path frees"
                     );
                 } else {
                     error!(
@@ -433,27 +403,23 @@ async fn run() -> Result<()> {
         glib::ControlFlow::Continue
     })?;
 
-    // Relay-state guards, live only for an RTSP OUTPUT:
-    // - broadcasting: the DESCRIBE watchdog exits non-zero if the publish dies,
-    //   so k8s restarts us — and if the relay stays down we come back up
-    //   map-only rather than crash-looping.
-    // - map-only: watch for the relay returning and exit cleanly to rebuild
-    //   with the publish wired in.
-    // The window-only local mode has no relay to watch.
-    if broadcasting {
+    // The DESCRIBE watchdog exits non-zero when a live publish dies without
+    // a bus error to show for it (rtspclientsink in RECORD mode never proves
+    // data flow), so k8s restarts us. It self-gates on the publish flag:
+    // map-only stretches — relay parked, or waiting out another publisher —
+    // are legitimately publisher-less and must not trip it. The window-only
+    // local mode has no relay to watch.
+    if let Some(out) = &out {
         let wd_failed = failed.clone();
         let wd_loop = main_loop.clone();
-        tokio::spawn(watchdog::run(rtsp_url.clone(), move || {
-            wd_failed.store(true, Ordering::SeqCst);
-            wd_loop.quit();
-        }));
-    } else if publish {
-        let rc = reconfigure.clone();
-        let rc_loop = main_loop.clone();
-        tokio::spawn(watchdog::run_reappear(rtsp_url.clone(), move || {
-            rc.store(true, Ordering::SeqCst);
-            rc_loop.quit();
-        }));
+        tokio::spawn(watchdog::run(
+            rtsp_url.clone(),
+            out.publishing_flag(),
+            move || {
+                wd_failed.store(true, Ordering::SeqCst);
+                wd_loop.quit();
+            },
+        ));
     }
 
     pipeline.set_state(gst::State::Playing)?;
@@ -465,10 +431,6 @@ async fn run() -> Result<()> {
         let _ = provider.shutdown();
     }
 
-    if reconfigure.load(Ordering::SeqCst) {
-        info!("relay returned; exiting cleanly to restart in broadcast mode");
-        return Ok(());
-    }
     if failed.load(Ordering::SeqCst) {
         bail!("pipeline failed");
     }

@@ -6,6 +6,8 @@
 
 use anyhow::{Context, Result, bail};
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info, warn};
@@ -33,26 +35,10 @@ fn relay_addr(url: &str) -> Result<String> {
     })
 }
 
-/// Is the MediaMTX relay listening? A plain TCP connect to the publish
-/// endpoint, bounded by `PROBE_TIMEOUT`. Unlike `describe`, this sends no RTSP
-/// request — MediaMTX DESCRIBEs a path 404 until a publisher attaches, so
-/// *before* we publish, "the port accepts a connection" is the honest signal
-/// that the relay pod is up. A parked relay (its Deployment scaled to 0) has no
-/// Service endpoints, so the connect is refused or times out.
-pub async fn relay_up(rtsp_url: &str) -> bool {
-    let Ok(addr) = relay_addr(rtsp_url) else {
-        return false;
-    };
-    matches!(
-        tokio::time::timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect(&addr)).await,
-        Ok(Ok(_))
-    )
-}
-
-/// One RTSP DESCRIBE against `url`, ok iff the server answers 200. MediaMTX
-/// only DESCRIBEs a path OK while it has a live publisher, so a 404/5xx here
-/// means our publish is gone even if the TCP port still accepts.
-async fn describe(url: &str) -> Result<()> {
+/// One RTSP DESCRIBE against `url`, resolving to the response's status line.
+/// Err means the relay didn't answer RTSP at all — dead, parked (a scaled-to-0
+/// Deployment has no Service endpoints), or not speaking the protocol.
+async fn describe_status(url: &str) -> Result<String> {
     let addr = relay_addr(url)?;
 
     let probe = async {
@@ -76,21 +62,43 @@ async fn describe(url: &str) -> Result<()> {
             buf.extend_from_slice(&chunk[..n]);
         }
         let line = String::from_utf8_lossy(&buf);
-        let status = line.lines().next().unwrap_or_default();
-        if !status.starts_with("RTSP/1.0 200") {
-            bail!("unexpected status: {status}");
-        }
-        Ok(())
+        Ok(line.lines().next().unwrap_or_default().to_string())
     };
     tokio::time::timeout(PROBE_TIMEOUT, probe)
         .await
         .map_err(|_| anyhow::anyhow!("DESCRIBE timed out after {PROBE_TIMEOUT:?}"))?
 }
 
+/// One RTSP DESCRIBE against `url`, ok iff the server answers 200. MediaMTX
+/// only DESCRIBEs a path OK while it has a live publisher, so a 404/5xx here
+/// means our publish is gone even if the TCP port still accepts.
+async fn describe(url: &str) -> Result<()> {
+    let status = describe_status(url).await?;
+    if !status.starts_with("RTSP/1.0 200") {
+        bail!("unexpected status: {status}");
+    }
+    Ok(())
+}
+
+/// True when the relay answers RTSP but no publisher holds the path (MediaMTX
+/// DESCRIBEs 404 until one attaches) — the only state where an RTSP RECORD
+/// can attach without kicking anyone. A dead or parked relay is not "free":
+/// publishing there would just fail.
+pub(crate) async fn path_free(url: &str) -> bool {
+    matches!(describe_status(url).await, Ok(s) if !s.starts_with("RTSP/1.0 200"))
+}
+
 /// Probe every `INTERVAL`; after `FAILURE_THRESHOLD` consecutive failures,
 /// log and invoke `on_dead` (which flags failure and quits the main loop, so
 /// the process exits non-zero through the normal teardown path).
-pub async fn run(rtsp_url: String, on_dead: impl Fn() + Send + 'static) {
+///
+/// Self-gates on `publishing`: while the publish slot is on its fakesink the
+/// path is legitimately publisher-less, so those probes count as healthy.
+pub async fn run(
+    rtsp_url: String,
+    publishing: Arc<AtomicBool>,
+    on_dead: impl Fn() + Send + 'static,
+) {
     info!(
         url = %rtsp_url,
         interval_s = INTERVAL.as_secs(),
@@ -105,7 +113,13 @@ pub async fn run(rtsp_url: String, on_dead: impl Fn() + Send + 'static) {
         INTERVAL,
         move || {
             let url = rtsp_url.clone();
-            async move { describe(&url).await }
+            let publishing = publishing.clone();
+            async move {
+                if !publishing.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                describe(&url).await
+            }
         },
         on_dead,
     )
@@ -154,28 +168,6 @@ async fn watch<Fut: Future<Output = Result<()>>>(
     }
 }
 
-/// The map-only counterpart to `run`: playout built a no-broadcast pipeline
-/// because the relay was parked, so watch for it coming back and, when it does,
-/// invoke `on_up` (a clean exit) so the restart rebuilds with the RTSP publish
-/// wired in. Probes on the same `INTERVAL`; a single successful connect is
-/// enough — a listening relay is unambiguous, and the publish path's own errors
-/// guard the reverse direction.
-pub async fn run_reappear(rtsp_url: String, on_up: impl Fn() + Send + 'static) {
-    info!(
-        url = %rtsp_url,
-        interval_s = INTERVAL.as_secs(),
-        "watching for the relay to return (map-only mode)"
-    );
-    loop {
-        tokio::time::sleep(INTERVAL).await;
-        if relay_up(&rtsp_url).await {
-            info!("relay is back; restarting to resume broadcast");
-            on_up();
-            return;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,20 +185,6 @@ mod tests {
         // No path at all.
         assert_eq!(relay_addr("rtsp://host:8554").unwrap(), "host:8554");
         assert!(relay_addr("http://host/dashcam").is_err());
-    }
-
-    #[tokio::test]
-    async fn relay_up_true_when_listening_false_when_not() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        assert!(relay_up(&format!("rtsp://{addr}/dashcam")).await);
-
-        // Drop the listener, then a fresh bind gives us a port nothing answers.
-        drop(listener);
-        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let dead_addr = dead.local_addr().unwrap();
-        drop(dead);
-        assert!(!relay_up(&format!("rtsp://{dead_addr}/dashcam")).await);
     }
 
     async fn serve_one(status: &'static str) -> String {
@@ -229,6 +207,26 @@ mod tests {
         let dead = serve_one("RTSP/1.0 404 Not Found\r\nCSeq: 1\r\n\r\n").await;
         let err = describe(&dead).await.unwrap_err();
         assert!(err.to_string().contains("404"));
+    }
+
+    /// The acquirer's tri-state, collapsed to "may I publish": a held path
+    /// (200) and a dead relay both say no; only an answering relay with no
+    /// publisher says yes. Wrong in the 200 arm and a rolling deploy kicks
+    /// the live publisher; wrong in the dead arm and boot wires a publish
+    /// that instantly fails.
+    #[tokio::test]
+    async fn path_free_only_when_the_relay_answers_without_a_publisher() {
+        let held = serve_one("RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n").await;
+        assert!(!path_free(&held).await);
+
+        let free = serve_one("RTSP/1.0 404 Not Found\r\nCSeq: 1\r\n\r\n").await;
+        assert!(path_free(&free).await);
+
+        // A bound-then-dropped port: nothing answers there.
+        let gone = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = gone.local_addr().unwrap();
+        drop(gone);
+        assert!(!path_free(&format!("rtsp://{addr}/dashcam")).await);
     }
 
     /// Drives `watch` with scripted probe outcomes (`true` = healthy), falling

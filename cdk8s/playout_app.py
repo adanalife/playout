@@ -102,13 +102,15 @@ def emit_image_gate(
     """Argo PreSync hook asserting `image_ref` exists in the registry before the
     sync reaches the Deployment.
 
-    playout deploys with strategy Recreate (one MediaMTX publisher at a time), so
-    a sync to a not-yet-built tag tears the live pod down first and leaves its
-    replacement in ImagePullBackOff — a stream outage. PreSync hooks must succeed
-    before the main sync wave, so a `crane manifest` that 404s fails the hook,
-    aborts the sync, and leaves the running pod untouched. Re-sync once the image
-    build lands. Only emitted for pinned (immutable-tag) envs — floating tags
-    always resolve to a prior build, so they can't hit this.
+    A sync to a not-yet-built tag leaves the incoming pod in ImagePullBackOff.
+    RollingUpdate (maxUnavailable 0) keeps the outgoing pod streaming through
+    that, so the stakes are a stuck rollout rather than an outage — but the
+    gate still fails the sync up front, where the miss is visible, instead of
+    leaving a half-rolled Deployment to discover later. PreSync hooks must
+    succeed before the main sync wave, so a `crane manifest` that 404s fails
+    the hook and aborts the sync. Re-sync once the image build lands. Only
+    emitted for pinned (immutable-tag) envs — floating tags always resolve to
+    a prior build, so they can't hit this.
     """
     _obj(
         scope,
@@ -284,7 +286,10 @@ class PlayoutInstance(Construct):
                 "initialDelaySeconds": 5,
                 "periodSeconds": 10,
             },
-            # Ready = pipeline PLAYING. Known ceiling: rtspclientsink in
+            # Ready = pipeline PLAYING — deliberately including map-only
+            # (publish slot on its fakesink, waiting for the MediaMTX path):
+            # ready-while-waiting is what lets a RollingUpdate SIGTERM the
+            # old pod so the path frees. Known ceiling: rtspclientsink in
             # RECORD mode reports PLAYING without proving data flow, so a
             # wedged-at-preroll pipeline still passes — the RTSP-DESCRIBE
             # watchdog is the real dead-publish detector.
@@ -327,9 +332,17 @@ class PlayoutInstance(Construct):
                 # ignore_replicas). Replica count is runtime-owned, not git-owned.
                 "replicas": 0,
                 "selector": {"matchLabels": {"app": name}},
-                # Recreate: two publishers racing on the same MediaMTX path
-                # would fight over it; one owner at a time.
-                "strategy": {"type": "Recreate"},
+                # New-then-old: the incoming pod boots map-only but ready
+                # (its publish slot polls the held MediaMTX path instead of
+                # kicking the live publisher), the outgoing pod is SIGTERMed
+                # once it's ready, and the freed path is acquired on the next
+                # poll — a sub-second on-air gap instead of Recreate's full
+                # teardown + boot + preroll (~5-8s). maxUnavailable 0 also
+                # keeps the old pod streaming if the new one never goes ready.
+                "strategy": {
+                    "type": "RollingUpdate",
+                    "rollingUpdate": {"maxSurge": 1, "maxUnavailable": 0},
+                },
                 "template": {
                     "metadata": {
                         "labels": labels,
@@ -340,8 +353,9 @@ class PlayoutInstance(Construct):
             },
         )
 
-        # Guard the Recreate teardown against a not-yet-built image (pinned
-        # envs only — floating tags always resolve to a prior build).
+        # Fail a sync to a not-yet-built image up front instead of leaving a
+        # stuck rollout (pinned envs only — floating tags always resolve to a
+        # prior build).
         if env.is_pinned("playout"):
             emit_image_gate(
                 self,
