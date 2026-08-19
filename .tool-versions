@@ -3,3 +3,6 @@
 rust 1.97.0
 python 3.13
 node 24
+# kubeconform validates the synthed cdk8s/dist/ against the k8s API schemas
+# (task cdk8s:validate, mirrored in pr-gates.yml).
+kubeconform 0.8.0

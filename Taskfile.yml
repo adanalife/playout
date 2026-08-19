@@ -31,6 +31,20 @@ tasks:
     cmds:
       - uv run --group cdk8s python cdk8s/main.py
 
+  # Schema-validate the committed cdk8s/dist/ (what Argo actually applies)
+  # against the cluster's k8s API version — catches API-version drift after a
+  # k8s bump. CRD kinds resolve via the datree CRDs-catalog; anything not
+  # there is skipped, not failed. Globbed to the *.k8s.yaml manifests only —
+  # dist/apps/ holds a plain-JSON discovery index for infra's ApplicationSet,
+  # not k8s resources. The {{`{{.Group}}`}} backtick wrapping keeps
+  # kubeconform's URL template out of Task's own templating. Mirrored in
+  # pr-gates.yml.
+  cdk8s:validate:
+    desc: Validate the committed cdk8s/dist/ manifests against the k8s API schemas (kubeconform)
+    cmds:
+      # -kubernetes-version tracks the live cluster (kubectl version); bump it with talos upgrades
+      - mise exec -- kubeconform -strict -summary -kubernetes-version 1.36.0 -schema-location default -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{`{{.Group}}`}}/{{`{{.ResourceKind}}`}}_{{`{{.ResourceAPIVersion}}`}}.json' -ignore-missing-schemas cdk8s/dist/*.k8s.yaml
+
   # contract.json is the canonical service-name/port/env-key vocabulary, owned
   # by tripbot (generated from its pkg/contract Go constants) and synced into
   # this repo. cdk8s reads playout's own Service name and HTTP port from it;
