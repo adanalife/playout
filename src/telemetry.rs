@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use opentelemetry::KeyValue;
 use opentelemetry::global;
-use opentelemetry::metrics::Counter;
+use opentelemetry::metrics::{Counter, Gauge};
 use opentelemetry_otlp::{MetricExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
@@ -79,6 +79,19 @@ pub static PUBLISH_ERRORS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter("playout")
         .u64_counter("playout_publish_errors_total")
         .with_description("Publish-branch errors absorbed by dropping to the map-only fakesink (rejected or kicked RTSP publish)")
+        .build()
+});
+
+pub static PUBLISH_GAP: LazyLock<Gauge<f64>> = LazyLock::new(|| {
+    global::meter("playout")
+        .f64_gauge("playout_publish_gap_seconds")
+        .with_description(
+            "Duration of the most recent publish gap: nothing held the RTSP path from the \
+             moment this process detached (error recovery) or first observed the path free \
+             (deploy handoffs — up to one 500ms acquire poll late) until its publish attached. \
+             Viewers additionally wait for the next IDR after the gap closes, so the on-screen \
+             blackout runs up to one GOP longer than this value.",
+        )
         .build()
 });
 

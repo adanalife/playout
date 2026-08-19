@@ -16,7 +16,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use gst::prelude::*;
@@ -131,6 +131,12 @@ pub(crate) struct Output {
     publishing: Arc<AtomicBool>,
     /// Wakes the acquirer after a start or drop into map-only.
     wake: Notify,
+    /// When the current publish gap opened — set on detach (error recovery)
+    /// or on the acquirer's first free-path sighting (deploy handoffs), and
+    /// taken on attach to record `playout_publish_gap_seconds`. None while
+    /// publishing and across a cold boot (no prior publisher, no gap to
+    /// measure).
+    gap_start: Mutex<Option<Instant>>,
 }
 
 impl Output {
@@ -157,6 +163,7 @@ impl Output {
             branch: Mutex::new(Vec::new()),
             publishing: Arc::new(AtomicBool::new(false)),
             wake: Notify::new(),
+            gap_start: Mutex::new(None),
         }))
     }
 
@@ -192,7 +199,13 @@ impl Output {
             }
         }
         self.publishing.store(true, Ordering::SeqCst);
-        info!(url = %self.rtsp_url, "publish attached");
+        if let Some(start) = self.gap_start.lock().unwrap().take() {
+            let gap_s = start.elapsed().as_secs_f64();
+            telemetry::PUBLISH_GAP.record(gap_s, telemetry::attrs());
+            info!(url = %self.rtsp_url, gap_s, "publish attached");
+        } else {
+            info!(url = %self.rtsp_url, "publish attached");
+        }
         Ok(())
     }
 
@@ -204,6 +217,7 @@ impl Output {
         let mut branch = self.branch.lock().unwrap();
         Self::detach_locked(&self.pipeline, &self.tee, &mut branch);
         self.publishing.store(false, Ordering::SeqCst);
+        *self.gap_start.lock().unwrap() = Some(Instant::now());
     }
 
     fn detach_locked(
@@ -258,6 +272,14 @@ impl Output {
                 if !watchdog::path_free(&self.rtsp_url).await {
                     continue;
                 }
+                // The gap clock for a handoff: the old publisher's exit is
+                // invisible from here, so the first free-path sighting is the
+                // earliest measurable start. get_or_insert keeps the earlier
+                // detach timestamp on the error-recovery path.
+                self.gap_start
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(Instant::now);
                 if let Err(e) = self.attach_publish() {
                     error!(err = %e, "attaching the publish failed; retrying");
                 }
