@@ -47,6 +47,17 @@ fn make_encode_branch(encoder_name: &str, rtsp_url: &str) -> Result<Vec<gst::Ele
     // whole pipeline — map, playhead, and all. Dropped buffers only ever
     // precede a working session; readers resync at the next IDR regardless.
     queue.set_property_from_str("leaky", "downstream");
+    // The leak bound must clear rtspclientsink's steady-state occupancy: its
+    // internal rtpbin holds `latency` (2s default) of stream even on a healthy
+    // session, so a cap below that sheds frames continuously — and every shed
+    // delta frame breaks readers' reference chains until the next IDR, which
+    // viewers see as constant artifacts. (The queue's default 1s time cap did
+    // exactly that.) 5s = that occupancy + headroom; time-bound only, since
+    // the default buffer/byte caps (200 buffers ≈ 3.3s at 60fps) would
+    // otherwise bind first and restate the same limit less directly.
+    queue.set_property("max-size-time", 5_000_000_000u64);
+    queue.set_property("max-size-buffers", 0u32);
+    queue.set_property("max-size-bytes", 0u32);
     let parse = gst::ElementFactory::make("h264parse").build()?;
     // Re-send SPS/PPS with every IDR so late joiners always sync.
     parse.set_property("config-interval", -1i32);
