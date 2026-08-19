@@ -68,11 +68,22 @@ fn missing_tools() -> &'static [&'static str] {
 }
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    // Not bind-port-0-and-drop: the OS hands the same ephemeral port to
+    // back-to-back callers, so while one claimant is still starting up the
+    // next test's server grabs its port and one of them dies on "address in
+    // use" (a mediamtx that never listens, a playout whose HTTP task
+    // panics). Claim sequentially from a pid-salted window instead — unique
+    // within the run by construction — and probe each is actually bindable
+    // before handing it out.
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let base = 20_000 + (std::process::id() % 20_000) as u16;
+    loop {
+        let port = base + NEXT.fetch_add(1, Ordering::Relaxed) % 20_000;
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// Child process killed on drop so a failing test never leaks servers.
@@ -793,12 +804,17 @@ async fn passthrough_resume_seeks_to_keyframe() {
 /// live publisher — and when the first exits, the second acquires the freed
 /// path in-process. Readiness-while-waiting is what lets a RollingUpdate
 /// SIGTERM the old pod; the acquire poll is what keeps the gap sub-second.
+///
+/// Passthrough, like the deployed envs: an x264enc attaching mid-run has to
+/// encode 1080p60 before the RTSP session can establish, which a CI runner
+/// can't do promptly — passthrough ships the already-compressed corpus, so
+/// the post-handoff DESCRIBE probes the swap, not the runner's encode speed.
 #[tokio::test]
 async fn a_second_playout_goes_ready_then_takes_over_when_the_first_exits() {
     serial_or_skip!();
     let (_nats, nport) = start_nats();
     let (_mtx, mport) = start_mediamtx();
-    let mut a = start_playout(corpus(), Some(nport), mport, "youtube");
+    let mut a = start_playout_with(corpus(), Some(nport), mport, "youtube", "passthrough");
     wait_ready(a.http);
     wait_for(
         "the first playout to publish",
@@ -807,7 +823,7 @@ async fn a_second_playout_goes_ready_then_takes_over_when_the_first_exits() {
     );
 
     // The rollout's incoming pod: same path, currently held.
-    let b = start_playout(corpus(), Some(nport), mport, "youtube");
+    let b = start_playout_with(corpus(), Some(nport), mport, "youtube", "passthrough");
     wait_ready(b.http);
     assert!(
         a.proc.0.try_wait().unwrap().is_none(),
@@ -833,10 +849,12 @@ async fn a_second_playout_goes_ready_then_takes_over_when_the_first_exits() {
     });
     assert!(status.success(), "SIGTERM exit was {status:?}");
 
-    // The second playout acquires the freed path and keeps serving.
+    // The second playout acquires the freed path and keeps serving. The
+    // budget is runner headroom, not the handoff target — the acquire poll
+    // runs at 500ms and lands the swap on its first free probe.
     wait_for(
         "the second playout to acquire the path",
-        Duration::from_secs(10),
+        Duration::from_secs(20),
         || describe_ok(&b.rtsp_url).then_some(()),
     );
     wait_current(b.http, "the second playout's clip", |c| !c.is_empty());
