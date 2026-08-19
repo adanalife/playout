@@ -2,6 +2,27 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.17.0] — 2026-08-19
+
+### Changed
+
+- Deploys now hand the MediaMTX path from the old pod to the new one in under a second, instead of a ~5–8s on-air gap. The RTSP publish is a detachable branch on the output tee: a pod that can't have the path (relay parked, another publisher holding it, a rejected/kicked publish) runs map-only but *ready*, polling until the path frees and attaching the publish in-process — it never kicks a live publisher, and never exits just to reconfigure. The Deployment rolls new-then-old (`RollingUpdate`, `maxUnavailable: 0`), so a broken image or a pod that never goes ready leaves the old pod streaming instead of taking the stream down. ([#132](https://github.com/adanalife/playout/pull/132))
+
+### Security
+
+- `h2` moves to 0.4.16, clearing [RUSTSEC-2026-0258](https://rustsec.org/advisories/RUSTSEC-2026-0258.html) — the crate queued empty HTTP/2 DATA frames without a limit, so a stream nobody drained could grow memory unbounded or panic on a length overflow. Low severity and reached only through `hyper`, not from anything playout calls directly. Found by the advisory scan this release adds, on its first run. ([#13](https://github.com/adanalife/playout/pull/13))
+
+### CI / Tooling
+
+- The advisory scan can publish its findings as a check run. It was missing `checks: write`, so the create-check call 403'd, the action reported that it "seems to be executed from the forked repository" — it isn't; that is just what a permission 403 looks like from inside it — and printed the advisory report into the job log instead, well below the line that says the job failed. ([#13](https://github.com/adanalife/playout/pull/13))
+- The weekly super-linter sweep passes again: codespell allowlists `unparseable`, and the workflow has the `statuses: write` permission its per-linter commit statuses need. ([#130](https://github.com/adanalife/playout/pull/130))
+- The changelog-fragment numbering workflow now fails loudly when it cannot diff against the base commit, instead of reporting success having numbered nothing. ([#131](https://github.com/adanalife/playout/pull/131))
+- Validate synthed `cdk8s/dist/` manifests against the cluster's k8s API schemas with kubeconform. ([#133](https://github.com/adanalife/playout/pull/133))
+
+### Misc
+
+- The NATS Service name and port in `NATS_URL` come from `contract.json` instead of being restated here. Rendered manifests are unchanged. ([#127](https://github.com/adanalife/playout/pull/127))
+
 ## [v0.16.0] — 2026-08-08
 
 ### Changed
