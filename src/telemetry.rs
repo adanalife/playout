@@ -75,6 +75,13 @@ pub static CLIP_ERRORS: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
+pub static PUBLISH_ERRORS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("playout")
+        .u64_counter("playout_publish_errors_total")
+        .with_description("Publish-branch errors absorbed by dropping to the map-only fakesink (rejected or kicked RTSP publish)")
+        .build()
+});
+
 pub static COMMANDS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter("playout")
         .u64_counter("playout_commands_total")

@@ -607,8 +607,8 @@ async fn boundaries_advance_and_wrap() {
 async fn map_only_plays_and_advances_without_a_relay() {
     serial_or_skip!();
     let (_nats, nport) = start_nats();
-    // A port nothing listens on: relay_up's connect is refused, so boot picks
-    // the map-only pipeline.
+    // A port nothing listens on: the boot path probe finds no relay, so boot
+    // picks the map-only pipeline.
     let p = start_playout(corpus(), Some(nport), free_port(), "youtube");
     wait_ready(p.http);
 
@@ -786,6 +786,60 @@ async fn passthrough_resume_seeks_to_keyframe() {
         Duration::from_secs(16),
         || (current(p.http) == "clip_c.mp4").then_some(()),
     );
+}
+
+/// A rolling deploy's publisher handoff: while one playout holds the MediaMTX
+/// path, a second boots map-only but *ready* — waiting instead of kicking the
+/// live publisher — and when the first exits, the second acquires the freed
+/// path in-process. Readiness-while-waiting is what lets a RollingUpdate
+/// SIGTERM the old pod; the acquire poll is what keeps the gap sub-second.
+#[tokio::test]
+async fn a_second_playout_goes_ready_then_takes_over_when_the_first_exits() {
+    serial_or_skip!();
+    let (_nats, nport) = start_nats();
+    let (_mtx, mport) = start_mediamtx();
+    let mut a = start_playout(corpus(), Some(nport), mport, "youtube");
+    wait_ready(a.http);
+    wait_for(
+        "the first playout to publish",
+        Duration::from_secs(10),
+        || describe_ok(&a.rtsp_url).then_some(()),
+    );
+
+    // The rollout's incoming pod: same path, currently held.
+    let b = start_playout(corpus(), Some(nport), mport, "youtube");
+    wait_ready(b.http);
+    assert!(
+        a.proc.0.try_wait().unwrap().is_none(),
+        "the first playout exited while the second booted — it was kicked off the path"
+    );
+    assert!(
+        describe_ok(&a.rtsp_url),
+        "the path lost its publisher while the second playout waited"
+    );
+
+    // k8s SIGTERMs the old pod once the new one is ready; its teardown frees
+    // the path.
+    let pid = a.proc.0.id().to_string();
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let status = wait_for("the first playout to exit", Duration::from_secs(10), || {
+        a.proc.0.try_wait().unwrap()
+    });
+    assert!(status.success(), "SIGTERM exit was {status:?}");
+
+    // The second playout acquires the freed path and keeps serving.
+    wait_for(
+        "the second playout to acquire the path",
+        Duration::from_secs(10),
+        || describe_ok(&b.rtsp_url).then_some(()),
+    );
+    wait_current(b.http, "the second playout's clip", |c| !c.is_empty());
 }
 
 /// SIGTERM exits zero after a clean teardown.
