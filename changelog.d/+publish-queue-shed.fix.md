@@ -1,0 +1,1 @@
+The publish branch no longer sheds frames during a healthy RTSP session. Its leaky queue's default 1s cap sat below rtspclientsink's ~2s steady-state occupancy, dropping roughly half of all frames and leaving every reader (OBS included) decoding constant reference errors — visible as heavy artifacts on the stream.
