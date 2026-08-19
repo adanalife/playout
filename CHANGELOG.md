@@ -2,6 +2,12 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.18.0] — 2026-08-19
+
+### Added
+
+- New `playout_publish_gap_seconds` metric: the duration of the most recent publish gap (deploy handoff or error recovery), so blackout length is measurable from Grafana instead of eyeballed from the stream. ([#137](https://github.com/adanalife/playout/pull/137))
+
 ## [v0.17.1] — 2026-08-19
 
 ### Fixed
