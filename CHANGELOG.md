@@ -2,6 +2,12 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.18.1] — 2026-08-21
+
+### Fixed
+
+- Publish the stream to MediaMTX over RTSP-interleaved TCP instead of UDP. `rtspclientsink` offered UDP first, and that hop dropped datagrams whenever the node was busy — MediaMTX discarded every frame a lost packet landed in, so viewers saw decoding artifacts until the next keyframe while the playhead, the frame-gap counter and OBS's skip counters all stayed clean. ([#139](https://github.com/adanalife/playout/pull/139))
+
 ## [v0.18.0] — 2026-08-19
 
 ### Added
