@@ -80,6 +80,17 @@ fn make_encode_branch(encoder_name: &str, rtsp_url: &str) -> Result<Vec<gst::Ele
         });
     let sink = gst::ElementFactory::make("rtspclientsink").build()?;
     sink.set_property("location", rtsp_url);
+    // Interleave RTP over the RTSP connection instead of a side UDP flow.
+    // rtspclientsink offers UDP first and MediaMTX accepts it, and that hop
+    // drops datagrams whenever the node is busy: an IDR is a burst of ~140
+    // back-to-back packets, so a briefly-descheduled reader overflows the
+    // receive buffer. MediaMTX discards any frame with a packet missing, which
+    // readers decode as broken references — visible artifacts until the next
+    // keyframe — while every other signal stays clean, including this
+    // pipeline's own frame-gap counter. TCP is flow-controlled, so the frames
+    // either arrive or block; the hop is pod-to-pod on one node, so the
+    // latency this trades for is nil.
+    sink.set_property_from_str("protocols", "tcp");
 
     if encoder_name == "passthrough" {
         return Ok(vec![queue, parse, sink]);
@@ -285,5 +296,26 @@ impl Output {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The publish must not negotiate UDP. rtspclientsink offers UDP ahead of
+    /// TCP by default and MediaMTX accepts it, so dropping the property is
+    /// silent everywhere else: the pipeline builds, the session establishes,
+    /// and the handoff tests pass while the stream quietly loses frames to a
+    /// busy node.
+    #[test]
+    fn publish_branch_forces_tcp_transport() {
+        gst::init().unwrap();
+        let branch = make_encode_branch("passthrough", "rtsp://localhost:8554/dashcam").unwrap();
+        let sink = branch.last().expect("the branch ends in the sink");
+        // GStreamer serializes a flags value to its nick; TCP alone means the
+        // UDP flags the default carries are gone.
+        let protocols = sink.property_value("protocols").serialize().unwrap();
+        assert_eq!(protocols.as_str(), "GST_RTSP_LOWER_TRANS_TCP");
     }
 }
