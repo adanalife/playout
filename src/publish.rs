@@ -39,7 +39,11 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// (identical params, IDR-leading closed GOPs), which is what makes splicing
 /// compressed streams safe. h264parse re-sends SPS/PPS at every IDR so each
 /// splice and every late joiner resyncs.
-fn make_encode_branch(encoder_name: &str, rtsp_url: &str) -> Result<Vec<gst::Element>> {
+fn make_encode_branch(
+    encoder_name: &str,
+    rtsp_url: &str,
+    gap_start: Option<Instant>,
+) -> Result<Vec<gst::Element>> {
     let queue = gst::ElementFactory::make("queue").build()?;
     // Never backpressure the tee: rtspclientsink consumes nothing until its
     // RTSP session establishes (and never again after the server closes it),
@@ -67,14 +71,22 @@ fn make_encode_branch(encoder_name: &str, rtsp_url: &str) -> Result<Vec<gst::Ele
     // keyframe through h264parse carries SPS/PPS in-band (config-interval
     // above), the probe removes itself, and the corpus GOP bounds the wait
     // to ~1-2s. Boot attaches start at a keyframe and pass straight through.
+    // That first keyframe is the moment the path carries video again, so it
+    // is where `playout_publish_gap_seconds` stops its clock: the IDR wait
+    // is the bulk of a handoff's on-air gap and would otherwise go uncounted.
     parse
         .static_pad("src")
         .expect("h264parse always has a static src pad")
-        .add_probe(gst::PadProbeType::BUFFER, |_, info| {
+        .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
             if let Some(gst::PadProbeData::Buffer(ref buf)) = info.data
                 && buf.flags().contains(gst::BufferFlags::DELTA_UNIT)
             {
                 return gst::PadProbeReturn::Drop;
+            }
+            if let Some(start) = gap_start {
+                let gap_s = start.elapsed().as_secs_f64();
+                telemetry::PUBLISH_GAP.record(gap_s, telemetry::attrs());
+                info!(gap_s, "publish live: first keyframe on the wire");
             }
             gst::PadProbeReturn::Remove
         });
@@ -144,9 +156,10 @@ pub(crate) struct Output {
     wake: Notify,
     /// When the current publish gap opened — set on detach (error recovery)
     /// or on the acquirer's first free-path sighting (deploy handoffs), and
-    /// taken on attach to record `playout_publish_gap_seconds`. None while
-    /// publishing and across a cold boot (no prior publisher, no gap to
-    /// measure).
+    /// taken on attach; the branch's keyframe probe records
+    /// `playout_publish_gap_seconds` when the first keyframe passes. None
+    /// while publishing and across a cold boot (no prior publisher, no gap
+    /// to measure).
     gap_start: Mutex<Option<Instant>>,
 }
 
@@ -160,7 +173,7 @@ impl Output {
         encoder_name: String,
         rtsp_url: String,
     ) -> Result<Arc<Self>> {
-        drop(make_encode_branch(&encoder_name, &rtsp_url)?);
+        drop(make_encode_branch(&encoder_name, &rtsp_url, None)?);
         let fakesink = make_fakesink_branch()?;
         let refs: Vec<&gst::Element> = fakesink.iter().collect();
         pipeline.add_many(&refs)?;
@@ -195,28 +208,32 @@ impl Output {
         if !branch.is_empty() {
             return Ok(());
         }
-        let elements = make_encode_branch(&self.encoder_name, &self.rtsp_url)?;
-        let refs: Vec<&gst::Element> = elements.iter().collect();
-        self.pipeline.add_many(&refs)?;
-        gst::Element::link_many(&refs)?;
-        self.tee.link(&elements[0])?;
-        // Publish the branch before starting it: a sink that errors during
-        // its state change must already be classifiable as the branch's.
-        *branch = elements.clone();
-        for e in elements.iter().rev() {
-            if let Err(e) = e.sync_state_with_parent() {
-                Self::detach_locked(&self.pipeline, &self.tee, &mut branch);
-                return Err(e).context("starting publish branch");
+        // The gap clock rides into the branch's keyframe probe; a failed
+        // attach hands it back so the retry keeps the original start.
+        let gap_start = self.gap_start.lock().unwrap().take();
+        let mut attach = || -> Result<()> {
+            let elements = make_encode_branch(&self.encoder_name, &self.rtsp_url, gap_start)?;
+            let refs: Vec<&gst::Element> = elements.iter().collect();
+            self.pipeline.add_many(&refs)?;
+            gst::Element::link_many(&refs)?;
+            self.tee.link(&elements[0])?;
+            // Publish the branch before starting it: a sink that errors during
+            // its state change must already be classifiable as the branch's.
+            *branch = elements.clone();
+            for e in elements.iter().rev() {
+                if let Err(e) = e.sync_state_with_parent() {
+                    Self::detach_locked(&self.pipeline, &self.tee, &mut branch);
+                    return Err(e).context("starting publish branch");
+                }
             }
+            Ok(())
+        };
+        if let Err(e) = attach() {
+            *self.gap_start.lock().unwrap() = gap_start;
+            return Err(e);
         }
         self.publishing.store(true, Ordering::SeqCst);
-        if let Some(start) = self.gap_start.lock().unwrap().take() {
-            let gap_s = start.elapsed().as_secs_f64();
-            telemetry::PUBLISH_GAP.record(gap_s, telemetry::attrs());
-            info!(url = %self.rtsp_url, gap_s, "publish attached");
-        } else {
-            info!(url = %self.rtsp_url, "publish attached");
-        }
+        info!(url = %self.rtsp_url, "publish attached; waiting for a keyframe");
         Ok(())
     }
 
@@ -311,7 +328,8 @@ mod tests {
     #[test]
     fn publish_branch_forces_tcp_transport() {
         gst::init().unwrap();
-        let branch = make_encode_branch("passthrough", "rtsp://localhost:8554/dashcam").unwrap();
+        let branch =
+            make_encode_branch("passthrough", "rtsp://localhost:8554/dashcam", None).unwrap();
         let sink = branch.last().expect("the branch ends in the sink");
         // GStreamer serializes a flags value to its nick; TCP alone means the
         // UDP flags the default carries are gone.

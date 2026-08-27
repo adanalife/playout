@@ -86,11 +86,11 @@ pub static PUBLISH_GAP: LazyLock<Gauge<f64>> = LazyLock::new(|| {
     global::meter("playout")
         .f64_gauge("playout_publish_gap_seconds")
         .with_description(
-            "Duration of the most recent publish gap: nothing held the RTSP path from the \
-             moment this process detached (error recovery) or first observed the path free \
-             (deploy handoffs — up to one 500ms acquire poll late) until its publish attached. \
-             Viewers additionally wait for the next IDR after the gap closes, so the on-screen \
-             blackout runs up to one GOP longer than this value.",
+            "Duration of the most recent publish gap: from the moment this process detached \
+             (error recovery) or first observed the RTSP path free (deploy handoffs — up to \
+             one 500ms acquire poll late) until its publish put the first keyframe on the \
+             wire. Excludes that poll latency and the readers' reconnect, so the on-screen \
+             blackout runs slightly longer than this value.",
         )
         .build()
 });
