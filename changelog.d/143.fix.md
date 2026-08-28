@@ -1,0 +1,1 @@
+`playout_publish_gap_seconds` now stops its clock when the first keyframe hits the wire instead of at branch attach. The attach step it timed before is ~1ms of a ~2s handoff gap; the ~1.6s IDR wait it skipped is most of the on-air blackout. The excluded remainder (acquire-poll latency, reader reconnect) is named in the metric description.

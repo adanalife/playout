@@ -860,6 +860,71 @@ async fn a_second_playout_goes_ready_then_takes_over_when_the_first_exits() {
     wait_current(b.http, "the second playout's clip", |c| !c.is_empty());
 }
 
+/// The published stream must arrive intact: a reader on the relay receives
+/// (approximately) every frame the corpus carries. Guards the publish
+/// queue's leak bound — a leaky cap below rtspclientsink's steady-state
+/// occupancy sheds frames continuously during a healthy session, which
+/// every reader decodes as an endless run of reference errors: constant
+/// visible artifacts, while the handoff/describe assertions all stay green.
+///
+/// Passthrough, so this stays inside the harness's no-realtime-encode rule:
+/// the corpus frames are pre-compressed and sustaining 1080p60 here is
+/// byte-shoveling, not encode throughput.
+#[tokio::test]
+async fn published_frames_all_reach_a_reader() {
+    serial_or_skip!();
+    let (_mtx, mport) = start_mediamtx();
+    let p = start_playout_with(corpus(), None, mport, "youtube", "passthrough");
+    wait_ready(p.http);
+    wait_for("the publish to establish", Duration::from_secs(10), || {
+        describe_ok(&p.rtsp_url).then_some(())
+    });
+
+    use gst::prelude::*;
+    use gstreamer as gst;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    gst::init().unwrap();
+    let reader = gst::parse::launch(&format!(
+        "rtspsrc location={} protocols=tcp latency=200 \
+         ! rtph264depay ! h264parse ! fakesink name=sink sync=false",
+        p.rtsp_url
+    ))
+    .unwrap()
+    .downcast::<gst::Pipeline>()
+    .unwrap();
+    let frames = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&frames);
+    reader
+        .by_name("sink")
+        .unwrap()
+        .static_pad("sink")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        });
+    reader.set_state(gst::State::Playing).unwrap();
+    wait_for(
+        "the first frame at the reader",
+        Duration::from_secs(10),
+        || (frames.load(Ordering::Relaxed) > 0).then_some(()),
+    );
+
+    let start = frames.load(Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let got = frames.load(Ordering::Relaxed) - start;
+    reader.set_state(gst::State::Null).ok();
+
+    // 10s of the 60fps corpus is 600 frames. 85% leaves room for runner
+    // jitter; the failure this guards is a steady shed (~50% received).
+    assert!(
+        got >= 510,
+        "reader received {got} of ~600 frames in 10s — the publish path is shedding frames"
+    );
+}
+
 /// SIGTERM exits zero after a clean teardown.
 #[tokio::test]
 async fn sigterm_exits_clean() {
