@@ -119,11 +119,11 @@ fn main() -> Result<()> {
     // worker, and the guard lives to the end of main so it flushes on exit.
     let deploy_env = deployment_env();
     let _sentry = sends_to_sentry(&deploy_env).then(|| {
-        sentry::init(sentry::ClientOptions {
-            release: Some(format!("playout@{VERSION}").into()),
-            environment: Some(deploy_env.clone().into()),
-            ..Default::default()
-        })
+        sentry::init(
+            sentry::ClientOptions::new()
+                .release(format!("playout@{VERSION}"))
+                .environment(deploy_env.clone()),
+        )
     });
     // One binary serves per-platform deployments (playout-youtube,
     // playout-twitch) sharing one Sentry project; the `platform` tag makes
