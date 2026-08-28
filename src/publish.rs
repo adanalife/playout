@@ -11,8 +11,10 @@
 //! kicks a live publisher off it. Rolling deploys ride this: the new pod
 //! goes ready with no publish branch while the old pod still publishes, k8s
 //! then SIGTERMs the old pod, its teardown frees the path, and the next poll
-//! acquires it — a handoff of about one poll interval, with OBS's RTSP
-//! session to MediaMTX untouched throughout.
+//! acquires it. OBS is never repointed — it stays pointed at the same relay
+//! across the swap — but its session does not survive it: MediaMTX destroys
+//! every reader when the publisher tears down, and OBS reconnects on its own
+//! a few hundred milliseconds later.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
