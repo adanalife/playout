@@ -715,6 +715,59 @@ async fn an_entirely_bad_corpus_gives_up_instead_of_spinning() {
     );
 }
 
+/// A corpus directory that is empty at boot and fills in later: a fresh PVC, or
+/// the node-local corpus repopulating after a storage swap (what the 2026-07-06
+/// T5 migration looked like from playout's side). The exit itself is the
+/// designed behavior — an empty `VIDEO_DIR` is a deployment fault, and a
+/// crash-loop beats a healthy-looking pod publishing nothing. What this pins is
+/// that the crash-loop **converges on its own** the moment media appears: the
+/// restart k8s was already doing goes on air, honors the resume state that was
+/// written while the directory was still empty, and needs no manual
+/// `play.random` to unstick it.
+#[tokio::test]
+async fn a_corpus_that_fills_in_later_converges_without_a_nudge() {
+    serial_or_skip!();
+    let (_nats, nport) = start_nats();
+    let (_mtx, mport) = start_mediamtx();
+    let dir = std::env::temp_dir().join(format!("playout-parity-late-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Resume state predates the media, as it would after any restart that
+    // outlives the volume's contents.
+    seed_lastplayed(nport, "youtube", CLIPS[2], 500).await;
+
+    let mut empty = start_playout(&dir, Some(nport), mport, "youtube");
+    let status = wait_for(
+        "playout to bail on the empty corpus",
+        Duration::from_secs(30),
+        || empty.proc.0.try_wait().unwrap(),
+    );
+    assert!(
+        !status.success(),
+        "an empty corpus exited {status:?}; k8s would read that as a clean stop and never restart"
+    );
+    drop(empty);
+
+    for name in CLIPS {
+        std::fs::copy(corpus().join(name), dir.join(name)).unwrap();
+    }
+
+    let filled = start_playout(&dir, Some(nport), mport, "youtube");
+    wait_ready(filled.http);
+    let cur = wait_current(filled.http, "the seeded resume clip", |c| !c.is_empty());
+    assert_eq!(
+        cur, CLIPS[2],
+        "resume state seeded before the media existed was dropped"
+    );
+    wait_for(
+        "MediaMTX path to have a publisher",
+        Duration::from_secs(10),
+        || describe_ok(&filled.rtsp_url).then_some(()),
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The control plane is best-effort: with no NATS reachable playout can't be
 /// commanded and can't resume its exact spot, but it must still loop the corpus
 /// on air. A boot that waits on NATS forever, or gives up without it, takes the
