@@ -2,6 +2,20 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.18.2] — 2026-08-29
+
+### Fixed
+
+- `playout_publish_gap_seconds` now stops its clock when the first keyframe hits the wire instead of at branch attach. The attach step it timed before is ~1ms of a ~2s handoff gap; the ~1.6s IDR wait it skipped is most of the on-air blackout. The excluded remainder (acquire-poll latency, reader reconnect) is named in the metric description. ([#143](https://github.com/adanalife/playout/pull/143))
+- Log a warning when a NATS command payload doesn't decode, instead of dropping the command in silence with the `playout_commands` counter still recording it as received. ([#148](https://github.com/adanalife/playout/pull/148))
+
+### Misc
+
+- Correct `publish.rs`'s module doc: OBS reconnects across a deploy handoff rather than keeping its session. ([#145](https://github.com/adanalife/playout/pull/145))
+- Behavior coverage for a corpus directory that is empty at boot and fills in later (a fresh PVC, or the node-local corpus repopulating after a storage swap): the empty-`VIDEO_DIR` exit is the designed deployment-fault signal, and the crash-loop now has a test proving it converges on its own once media appears — resume state written while the directory was still empty is honored, and no manual `play.random` is needed. ([#146](https://github.com/adanalife/playout/pull/146))
+- Pin the undecodable-command-payload fallbacks in the behavior suite: `skip` moves one clip, `play.file` leaves state alone. ([#148](https://github.com/adanalife/playout/pull/148))
+- Swap the `hadolint-docker` pre-commit hook for the plain `hadolint` binary and add a guard that fails the config if a `language: docker_image` hook is ever reintroduced. ([#149](https://github.com/adanalife/playout/pull/149))
+
 ## [v0.18.1] — 2026-08-21
 
 ### Fixed
