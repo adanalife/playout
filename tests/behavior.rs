@@ -590,6 +590,23 @@ async fn commands_act_and_other_platform_is_isolated() {
     wait_current(p.http, "rewind start", |c| c == "clip_c.mp4");
     publish_command(nport, "youtube", "seek", r#"{"delta_ms":-30000}"#).await;
     wait_current(p.http, "seek backward target", |c| c == "clip_a.mp4");
+
+    // An undecodable payload takes the verb's documented fallback rather than
+    // some third behavior: skip still moves one clip, play.file still leaves
+    // state alone. Both are warned, so a producer that renames a field leaves
+    // a trace instead of a command that quietly stops working.
+    publish_command(nport, "youtube", "play.file", r#"{"file":"clip_b.mp4"}"#).await;
+    wait_current(p.http, "fallback start", |c| c == "clip_b.mp4");
+    publish_command(nport, "youtube", "skip", "not json at all").await;
+    let expected = clip_after("clip_b.mp4", 1);
+    wait_current(p.http, "undecodable skip target", |c| c == expected);
+    publish_command(nport, "youtube", "play.file", r#"{"renamed":"clip_a.mp4"}"#).await;
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        current(p.http),
+        expected,
+        "undecodable play.file changed state"
+    );
 }
 
 /// Natural boundaries advance through the playlist and wrap — with 2s clips,
