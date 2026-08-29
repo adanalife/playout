@@ -230,9 +230,7 @@ impl Control {
             // off the GLib main loop that clip teardown shares. Only the
             // final play_index hops onto it, like every other mutation.
             if verb == "seek" {
-                let delta_ms = serde_json::from_slice::<DeltaArg>(&payload)
-                    .map(|a| a.delta_ms)
-                    .unwrap_or(0);
+                let delta_ms = decode::<DeltaArg>(&verb, &payload).map_or(0, |a| a.delta_ms);
                 if delta_ms == 0 {
                     continue;
                 }
@@ -281,32 +279,44 @@ fn verb_of<'a>(subject: &'a str, base: &str, platform: &str) -> Option<&'a str> 
         .strip_suffix('.')
 }
 
+/// Decode a command payload, warning rather than dropping it in silence. Every
+/// command that reaches this point has already been counted by `COMMANDS`, so a
+/// payload the producer and consumer disagree about would otherwise vanish with
+/// the counter still claiming it landed. Real traffic always decodes — the
+/// publisher marshals a struct — so this only fires on genuine contract drift.
+fn decode<T: serde::de::DeserializeOwned>(verb: &str, payload: &[u8]) -> Option<T> {
+    match serde_json::from_slice(payload) {
+        Ok(v) => Some(v),
+        Err(err) => {
+            warn!(
+                verb,
+                %err,
+                payload = %String::from_utf8_lossy(payload),
+                "undecodable command payload"
+            );
+            None
+        }
+    }
+}
+
 /// Map a command verb + payload to a Player operation. Runs on the main loop.
 fn dispatch(player: &SharedPlayer, verb: &str, payload: &[u8]) {
     match verb {
         "play.random" => player.play_random(),
         "play.file" => {
-            if let Ok(p) = serde_json::from_slice::<PlayFile>(payload) {
+            if let Some(p) = decode::<PlayFile>(verb, payload) {
                 player.play_file(&p.file);
             }
         }
         "play.at" => {
-            if let Ok(p) = serde_json::from_slice::<PlayFileAt>(payload) {
+            if let Some(p) = decode::<PlayFileAt>(verb, payload) {
                 player.play_at(&p.file, p.position_ms);
             }
         }
-        "skip" => {
-            let n = serde_json::from_slice::<NArg>(payload)
-                .map(|a| a.n)
-                .unwrap_or(1);
-            player.skip(n);
-        }
-        "back" => {
-            let n = serde_json::from_slice::<NArg>(payload)
-                .map(|a| a.n)
-                .unwrap_or(1);
-            player.back(n);
-        }
+        // skip/back fall back to one clip rather than dropping: the move is
+        // what the viewer asked for and the count is the detail.
+        "skip" => player.skip(decode::<NArg>(verb, payload).map_or(1, |a| a.n)),
+        "back" => player.back(decode::<NArg>(verb, payload).map_or(1, |a| a.n)),
         // Unknown verbs: ignore (only the subscribed command subjects arrive).
         _ => {}
     }
