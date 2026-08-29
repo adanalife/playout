@@ -43,11 +43,26 @@ repos:
     hooks:
       - id: actionlint
 
-  # Dockerfile linting.
+  # Dockerfile linting. The plain `hadolint` hook, not `hadolint-docker`: the
+  # docker variant runs hadolint through the runner's Docker daemon, and on the
+  # self-hosted runners that `docker run` takes the whole node down. This one
+  # runs the binary mise puts on PATH (see .tool-versions), which also keeps the
+  # hook usable on a laptop with Docker stopped.
   - repo: https://github.com/hadolint/hadolint
-    rev: v2.14.0
+    rev: v2.15.1
     hooks:
-      - id: hadolint-docker
+      - id: hadolint
+
+  # No hook may run through a Docker daemon: a `docker run` on the self-hosted
+  # runners takes the node down, and the whole fleet has been cleared of the
+  # class once already. Cheaper to fail the config than to rediscover it.
+  - repo: local
+    hooks:
+      - id: forbid-docker-image-hooks
+        name: "forbid `language: docker_image` hooks"
+        language: pygrep
+        entry: '^\s*language:\s*[''"]?docker_image'
+        files: ^\.pre-commit-config\.yaml$
 
   # Rust formatting. Wrapped in `mise exec` so it resolves the repo-pinned
   # toolchain on hosts where mise isn't activated in the hook's shell.

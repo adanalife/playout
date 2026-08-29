@@ -6,3 +6,5 @@ node 24
 # kubeconform validates the synthed cdk8s/dist/ against the k8s API schemas
 # (task cdk8s:validate, mirrored in pr-gates.yml).
 kubeconform 0.8.0
+# the hadolint rev in .pre-commit-config.yaml (the hook runs whatever is on PATH).
+hadolint 2.15.1
