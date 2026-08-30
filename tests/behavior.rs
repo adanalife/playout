@@ -590,6 +590,23 @@ async fn commands_act_and_other_platform_is_isolated() {
     wait_current(p.http, "rewind start", |c| c == "clip_c.mp4");
     publish_command(nport, "youtube", "seek", r#"{"delta_ms":-30000}"#).await;
     wait_current(p.http, "seek backward target", |c| c == "clip_a.mp4");
+
+    // An undecodable payload takes the verb's documented fallback rather than
+    // some third behavior: skip still moves one clip, play.file still leaves
+    // state alone. Both are warned, so a producer that renames a field leaves
+    // a trace instead of a command that quietly stops working.
+    publish_command(nport, "youtube", "play.file", r#"{"file":"clip_b.mp4"}"#).await;
+    wait_current(p.http, "fallback start", |c| c == "clip_b.mp4");
+    publish_command(nport, "youtube", "skip", "not json at all").await;
+    let expected = clip_after("clip_b.mp4", 1);
+    wait_current(p.http, "undecodable skip target", |c| c == expected);
+    publish_command(nport, "youtube", "play.file", r#"{"renamed":"clip_a.mp4"}"#).await;
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        current(p.http),
+        expected,
+        "undecodable play.file changed state"
+    );
 }
 
 /// Natural boundaries advance through the playlist and wrap — with 2s clips,
@@ -713,6 +730,59 @@ async fn an_entirely_bad_corpus_gives_up_instead_of_spinning() {
         !status.success(),
         "an unplayable corpus exited {status:?}; k8s would read that as a clean stop"
     );
+}
+
+/// A corpus directory that is empty at boot and fills in later: a fresh PVC, or
+/// the node-local corpus repopulating after a storage swap (what the 2026-07-06
+/// T5 migration looked like from playout's side). The exit itself is the
+/// designed behavior — an empty `VIDEO_DIR` is a deployment fault, and a
+/// crash-loop beats a healthy-looking pod publishing nothing. What this pins is
+/// that the crash-loop **converges on its own** the moment media appears: the
+/// restart k8s was already doing goes on air, honors the resume state that was
+/// written while the directory was still empty, and needs no manual
+/// `play.random` to unstick it.
+#[tokio::test]
+async fn a_corpus_that_fills_in_later_converges_without_a_nudge() {
+    serial_or_skip!();
+    let (_nats, nport) = start_nats();
+    let (_mtx, mport) = start_mediamtx();
+    let dir = std::env::temp_dir().join(format!("playout-parity-late-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Resume state predates the media, as it would after any restart that
+    // outlives the volume's contents.
+    seed_lastplayed(nport, "youtube", CLIPS[2], 500).await;
+
+    let mut empty = start_playout(&dir, Some(nport), mport, "youtube");
+    let status = wait_for(
+        "playout to bail on the empty corpus",
+        Duration::from_secs(30),
+        || empty.proc.0.try_wait().unwrap(),
+    );
+    assert!(
+        !status.success(),
+        "an empty corpus exited {status:?}; k8s would read that as a clean stop and never restart"
+    );
+    drop(empty);
+
+    for name in CLIPS {
+        std::fs::copy(corpus().join(name), dir.join(name)).unwrap();
+    }
+
+    let filled = start_playout(&dir, Some(nport), mport, "youtube");
+    wait_ready(filled.http);
+    let cur = wait_current(filled.http, "the seeded resume clip", |c| !c.is_empty());
+    assert_eq!(
+        cur, CLIPS[2],
+        "resume state seeded before the media existed was dropped"
+    );
+    wait_for(
+        "MediaMTX path to have a publisher",
+        Duration::from_secs(10),
+        || describe_ok(&filled.rtsp_url).then_some(()),
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The control plane is best-effort: with no NATS reachable playout can't be
