@@ -1,9 +1,9 @@
 //! Control plane. Commands arrive over **core NATS** (fire-and-forget,
-//! `tripbot.<env>.vlc.<verb>.<platform>`); the currently-playing clip and
-//! playback position flow back through the `TRIPBOT_VLC_LASTPLAYED` JetStream
-//! last-value cache, which a restarted instance reads to resume where it left
-//! off. The `vlc` subject token and stream name are the wire contract tripbot's
-//! playout-client speaks — the names outlived the libvlc server they came from.
+//! `tripbot.<env>.<domain>.<verb>.<platform>`); the currently-playing clip and
+//! playback position flow back through the `TRIPBOT_<DOMAIN>_LASTPLAYED`
+//! JetStream last-value cache, which a restarted instance reads to resume where
+//! it left off. Every wire name is served under two domains (see [`DOMAINS`])
+//! while the consumers migrate from the legacy `vlc` token to `playout`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,11 +17,20 @@ use tracing::{info, warn};
 
 use crate::SharedPlayer;
 
-/// JetStream stream backing the lastplayed last-value cache.
-const LASTPLAYED_STREAM: &str = "TRIPBOT_VLC_LASTPLAYED";
+/// Wire-name domains, in resume-precedence order. `playout` is the name;
+/// `vlc` is the legacy token tripbot's playout-client and the console still
+/// speak — it goes (along with its JetStream stream) once every consumer has
+/// flipped to `playout`. Until then commands are accepted on both, and the
+/// lastplayed cache is published to both.
+const DOMAINS: [&str; 2] = ["playout", "vlc"];
 
-fn subject(env: &str, verb: &str) -> String {
-    format!("tripbot.{env}.vlc.{verb}")
+/// JetStream stream backing one domain's lastplayed last-value cache.
+fn lastplayed_stream(domain: &str) -> String {
+    format!("TRIPBOT_{}_LASTPLAYED", domain.to_ascii_uppercase())
+}
+
+fn subject(env: &str, domain: &str, verb: &str) -> String {
+    format!("tripbot.{env}.{domain}.{verb}")
 }
 
 // Command payloads — the fields playout acts on. serde ignores the envelope's
@@ -106,15 +115,18 @@ pub async fn connect(env: String, platform: String, url: String) -> Option<Contr
     // once NATS recovers.
     wait_for_connect(&client, Duration::from_secs(10)).await;
 
-    // Idempotent: the stream outlives any single instance, so most boots find
-    // it already declared. A config mismatch just logs — the stream still
+    // Idempotent: the streams outlive any single instance, so most boots find
+    // them already declared. A config mismatch just logs — the stream still
     // exists, so publishes to its subject are captured either way.
-    let cfg = jetstream::stream::Config {
-        name: LASTPLAYED_STREAM.to_string(),
-        subjects: vec![format!("{}.*", subject(&env, "lastplayed"))],
-        max_messages_per_subject: 1,
-        ..Default::default()
-    };
+    let cfgs: Vec<_> = DOMAINS
+        .iter()
+        .map(|d| jetstream::stream::Config {
+            name: lastplayed_stream(d),
+            subjects: vec![format!("{}.*", subject(&env, d, "lastplayed"))],
+            max_messages_per_subject: 1,
+            ..Default::default()
+        })
+        .collect();
     // Declaring the stream is a JetStream round-trip, so it must not sit on the
     // boot path: against an unreachable server the request only burns its own
     // timeout, delaying first frame by that much for a stream nobody can read
@@ -125,8 +137,11 @@ pub async fn connect(env: String, platform: String, url: String) -> Option<Contr
         while ensure.connection_state() != async_nats::connection::State::Connected {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        if let Err(e) = jetstream::new(ensure).create_stream(cfg).await {
-            warn!(err = %e, "ensure lastplayed stream failed");
+        let js = jetstream::new(ensure);
+        for cfg in cfgs {
+            if let Err(e) = js.create_stream(cfg).await {
+                warn!(err = %e, "ensure lastplayed stream failed");
+            }
         }
     });
     Some(Control {
@@ -152,13 +167,19 @@ async fn wait_for_connect(client: &async_nats::Client, timeout: Duration) {
 }
 
 impl Control {
-    fn lastplayed_subject(&self) -> String {
-        format!("{}.{}", subject(&self.env, "lastplayed"), self.platform)
+    fn lastplayed_subject(&self, domain: &str) -> String {
+        format!(
+            "{}.{}",
+            subject(&self.env, domain, "lastplayed"),
+            self.platform
+        )
     }
 
     /// Read this instance's last-value cache: the clip + position it published
     /// before restart, mapped to a playlist index. None when there's nothing to
-    /// resume or the clip has since left the corpus.
+    /// resume or the clip has since left the corpus. Each domain's stream is
+    /// tried in `DOMAINS` order, so an instance upgraded from a build that only
+    /// wrote the legacy stream still resumes from it.
     pub async fn resume_target(&self, player: &SharedPlayer) -> Option<(usize, i64)> {
         // The startup window above has already settled whether NATS answers. If
         // it doesn't, a JetStream read here would spend its whole timeout
@@ -169,25 +190,36 @@ impl Control {
             return None;
         }
         let js = jetstream::new(self.client.clone());
-        let stream = js.get_stream(LASTPLAYED_STREAM).await.ok()?;
-        let msg = stream
-            .get_last_raw_message_by_subject(&self.lastplayed_subject())
-            .await
-            .ok()?;
-        let ev: LastPlayed = serde_json::from_slice(&msg.payload).ok()?;
-        let index = player.find(&ev.file)?;
-        info!(file = %ev.file, position_ms = ev.position_ms, "resuming");
-        Some((index, ev.position_ms))
+        for domain in DOMAINS {
+            let Ok(stream) = js.get_stream(lastplayed_stream(domain)).await else {
+                continue;
+            };
+            let Ok(msg) = stream
+                .get_last_raw_message_by_subject(&self.lastplayed_subject(domain))
+                .await
+            else {
+                continue;
+            };
+            let Ok(ev) = serde_json::from_slice::<LastPlayed>(&msg.payload) else {
+                continue;
+            };
+            let Some(index) = player.find(&ev.file) else {
+                continue;
+            };
+            info!(file = %ev.file, position_ms = ev.position_ms, domain, "resuming");
+            return Some((index, ev.position_ms));
+        }
+        None
     }
 
     /// Subscribe to the command subjects and dispatch onto the GLib main loop
     /// (`idle_add_once`) so every pipeline mutation is serialized with the
     /// natural-boundary teardown — no cross-thread races on the clip list.
     ///
-    /// One explicit subscription per verb, each with this instance's platform
-    /// leaf (`tripbot.<env>.vlc.<verb>.<platform>`) — the shape tripbot
-    /// publishes. The leaf keeps platforms isolated: a Twitch-triggered skip
-    /// must never advance the YouTube stream sharing the env's NATS.
+    /// One explicit subscription per domain × verb, each with this instance's
+    /// platform leaf (`tripbot.<env>.<domain>.<verb>.<platform>`) — the shape
+    /// tripbot publishes. The leaf keeps platforms isolated: a Twitch-triggered
+    /// skip must never advance the YouTube stream sharing the env's NATS.
     pub async fn run_commands(self: Arc<Self>, player: SharedPlayer) {
         const VERBS: [&str; 6] = [
             "play.random",
@@ -197,22 +229,28 @@ impl Control {
             "back",
             "seek",
         ];
-        let base = subject(&self.env, ""); // "tripbot.<env>.vlc."
+        // "tripbot.<env>.<domain>." — one prefix per domain.
+        let bases: Vec<String> = DOMAINS.iter().map(|d| subject(&self.env, d, "")).collect();
         let mut subs = Vec::new();
-        for verb in VERBS {
-            let subj = format!("{base}{verb}.{}", self.platform);
-            match self.client.subscribe(subj.clone()).await {
-                Ok(s) => subs.push(s),
-                Err(e) => {
-                    warn!(subject = %subj, err = %e, "nats subscribe failed; control plane disabled");
-                    return;
+        for base in &bases {
+            for verb in VERBS {
+                let subj = format!("{base}{verb}.{}", self.platform);
+                match self.client.subscribe(subj.clone()).await {
+                    Ok(s) => subs.push(s),
+                    Err(e) => {
+                        warn!(subject = %subj, err = %e, "nats subscribe failed; control plane disabled");
+                        return;
+                    }
                 }
+                info!(subject = %subj, "nats subscribed");
             }
-            info!(subject = %subj, "nats subscribed");
         }
         let mut merged = futures::stream::select_all(subs);
         while let Some(msg) = merged.next().await {
-            let Some(verb) = verb_of(msg.subject.as_str(), &base, &self.platform) else {
+            let Some(verb) = bases
+                .iter()
+                .find_map(|base| verb_of(msg.subject.as_str(), base, &self.platform))
+            else {
                 continue;
             };
             let verb = verb.to_owned();
@@ -246,10 +284,10 @@ impl Control {
     }
 
     /// Republish the current clip + position every `interval` so the last-value
-    /// cache tracks where playback is. Worst case a restart resumes one
-    /// interval behind.
+    /// cache tracks where playback is — once per domain, so both streams hold
+    /// the same record. Worst case a restart resumes one interval behind.
     pub async fn run_ticker(self: Arc<Self>, player: SharedPlayer, interval: Duration) {
-        let subj = self.lastplayed_subject();
+        let subjs: Vec<String> = DOMAINS.iter().map(|d| self.lastplayed_subject(d)).collect();
         let mut tick = tokio::time::interval(interval);
         loop {
             tick.tick().await;
@@ -265,13 +303,18 @@ impl Control {
                 "position_ms": position_ms,
             })
             .to_string();
-            let _ = self.client.publish(subj.clone(), payload.into()).await;
+            for subj in &subjs {
+                let _ = self
+                    .client
+                    .publish(subj.clone(), payload.clone().into())
+                    .await;
+            }
         }
     }
 }
 
-/// Command verb from a full subject: strips the `tripbot.<env>.vlc.` prefix
-/// and this instance's `.<platform>` leaf. None for foreign subjects.
+/// Command verb from a full subject: strips the `tripbot.<env>.<domain>.`
+/// prefix and this instance's `.<platform>` leaf. None for foreign subjects.
 fn verb_of<'a>(subject: &'a str, base: &str, platform: &str) -> Option<&'a str> {
     subject
         .strip_prefix(base)?
@@ -324,7 +367,21 @@ fn dispatch(player: &SharedPlayer, verb: &str, payload: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::verb_of;
+    use super::{DOMAINS, lastplayed_stream, subject, verb_of};
+
+    /// The wire names are the contract tripbot and the console speak; both
+    /// spellings must stay byte-exact until the legacy one is dropped.
+    #[test]
+    fn wire_names_match_the_contract() {
+        assert_eq!(DOMAINS, ["playout", "vlc"]);
+        assert_eq!(subject("prod", "vlc", "skip"), "tripbot.prod.vlc.skip");
+        assert_eq!(
+            subject("prod", "playout", "skip"),
+            "tripbot.prod.playout.skip"
+        );
+        assert_eq!(lastplayed_stream("vlc"), "TRIPBOT_VLC_LASTPLAYED");
+        assert_eq!(lastplayed_stream("playout"), "TRIPBOT_PLAYOUT_LASTPLAYED");
+    }
 
     #[test]
     fn verb_of_strips_base_and_platform_leaf() {

@@ -1,0 +1,1 @@
+Serve every wire name under the `playout` token alongside the legacy `vlc` one: commands on `tripbot.<env>.playout.*`, the `TRIPBOT_PLAYOUT_LASTPLAYED` resume cache (read `playout`-first, written to both), and `/playout/current`. First wave of the coordinated `vlc` → `playout` rename; the legacy names stay until tripbot and the console have flipped.

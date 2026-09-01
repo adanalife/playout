@@ -44,6 +44,8 @@ async fn version() -> impl IntoResponse {
 
 /// Plain-text basename of the current clip — read verbatim by tripbot's
 /// playout-client, so no path, no trailing newline. Empty string when idle.
+/// Served at both `/playout/current` and the legacy `/vlc/current` path the
+/// consumers still dial; the legacy route goes once they've all moved.
 async fn current(State(player): State<SharedPlayer>) -> String {
     player.current_basename().unwrap_or_default()
 }
@@ -73,6 +75,7 @@ pub async fn run(player: SharedPlayer) {
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/version", get(version))
+        .route("/playout/current", get(current))
         .route("/vlc/current", get(current))
         .route("/debug/pipeline", get(pipeline_dot))
         .with_state(player);
