@@ -56,7 +56,7 @@ class EnvConfig:
     namespace: str
     image_tag: str  # floating tag (main) for components without a pin
 
-    # tripbot env token in the NATS command subjects (tripbot.<nats_env>.vlc.*),
+    # tripbot env token in the NATS command subjects (tripbot.<nats_env>.playout.*),
     # matching what cmd/tripbot publishes — NOT the k8s env name.
     nats_env: str = "development"
 

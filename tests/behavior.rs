@@ -288,8 +288,12 @@ fn http_get(port: u16, path: &str) -> Option<(u16, Vec<u8>)> {
 }
 
 fn current(port: u16) -> String {
-    let (status, body) = http_get(port, "/vlc/current").unwrap_or((0, Vec::new()));
-    assert!(status == 200 || status == 0, "GET /vlc/current -> {status}");
+    current_at(port, "/vlc/current")
+}
+
+fn current_at(port: u16, path: &str) -> String {
+    let (status, body) = http_get(port, path).unwrap_or((0, Vec::new()));
+    assert!(status == 200 || status == 0, "GET {path} -> {status}");
     String::from_utf8(body).expect("current is utf-8")
 }
 
@@ -334,8 +338,16 @@ fn describe_ok(rtsp_url: &str) -> bool {
     String::from_utf8_lossy(&buf[..n]).starts_with("RTSP/1.0 200")
 }
 
-fn lastplayed_subject(platform: &str) -> String {
-    format!("tripbot.test.vlc.lastplayed.{platform}")
+/// Both wire-name domains playout serves during the rename; the legacy `vlc`
+/// spelling is what tripbot and the console still publish and read.
+const DOMAINS: [&str; 2] = ["playout", "vlc"];
+
+fn lastplayed_stream(domain: &str) -> String {
+    format!("TRIPBOT_{}_LASTPLAYED", domain.to_ascii_uppercase())
+}
+
+fn lastplayed_subject(domain: &str, platform: &str) -> String {
+    format!("tripbot.test.{domain}.lastplayed.{platform}")
 }
 
 async fn nats_client(port: u16) -> async_nats::Client {
@@ -344,18 +356,26 @@ async fn nats_client(port: u16) -> async_nats::Client {
         .expect("connecting test nats client")
 }
 
+/// Seed the same record into every domain's stream — what a fleet whose
+/// consumers all publish in step looks like.
 async fn seed_lastplayed(port: u16, platform: &str, file: &str, position_ms: i64) {
+    for domain in DOMAINS {
+        seed_lastplayed_on(port, domain, platform, file, position_ms).await;
+    }
+}
+
+async fn seed_lastplayed_on(port: u16, domain: &str, platform: &str, file: &str, position_ms: i64) {
     let js = async_nats::jetstream::new(nats_client(port).await);
     js.create_stream(async_nats::jetstream::stream::Config {
-        name: "TRIPBOT_VLC_LASTPLAYED".to_string(),
-        subjects: vec!["tripbot.test.vlc.lastplayed.*".to_string()],
+        name: lastplayed_stream(domain),
+        subjects: vec![format!("tripbot.test.{domain}.lastplayed.*")],
         max_messages_per_subject: 1,
         ..Default::default()
     })
     .await
     .expect("creating lastplayed stream");
     js.publish(
-        lastplayed_subject(platform),
+        lastplayed_subject(domain, platform),
         serde_json::json!({"emitted_at": "", "file": file, "position_ms": position_ms})
             .to_string()
             .into(),
@@ -366,11 +386,11 @@ async fn seed_lastplayed(port: u16, platform: &str, file: &str, position_ms: i64
     .expect("lastplayed ack");
 }
 
-async fn read_lastplayed(port: u16, platform: &str) -> Option<(String, i64)> {
+async fn read_lastplayed(port: u16, domain: &str, platform: &str) -> Option<(String, i64)> {
     let js = async_nats::jetstream::new(nats_client(port).await);
-    let stream = js.get_stream("TRIPBOT_VLC_LASTPLAYED").await.ok()?;
+    let stream = js.get_stream(lastplayed_stream(domain)).await.ok()?;
     let msg = stream
-        .get_last_raw_message_by_subject(&lastplayed_subject(platform))
+        .get_last_raw_message_by_subject(&lastplayed_subject(domain, platform))
         .await
         .ok()?;
     let v: serde_json::Value = serde_json::from_slice(&msg.payload).ok()?;
@@ -381,10 +401,14 @@ async fn read_lastplayed(port: u16, platform: &str) -> Option<(String, i64)> {
 }
 
 async fn publish_command(port: u16, platform: &str, verb: &str, payload: &str) {
+    publish_command_on(port, "vlc", platform, verb, payload).await;
+}
+
+async fn publish_command_on(port: u16, domain: &str, platform: &str, verb: &str, payload: &str) {
     let client = nats_client(port).await;
     client
         .publish(
-            format!("tripbot.test.vlc.{verb}.{platform}"),
+            format!("tripbot.test.{domain}.{verb}.{platform}"),
             payload.to_string().into(),
         )
         .await
@@ -394,10 +418,10 @@ async fn publish_command(port: u16, platform: &str, verb: &str, payload: &str) {
 
 /// Wait for a lastplayed publish, then for it to change — the playhead the
 /// console map reads is moving, not frozen at whatever it booted on.
-async fn wait_ticker_advances(port: u16, platform: &str) {
+async fn wait_ticker_advances(port: u16, domain: &str, platform: &str) {
     let deadline = Instant::now() + Duration::from_secs(15);
     let first = loop {
-        if let Some(v) = read_lastplayed(port, platform).await {
+        if let Some(v) = read_lastplayed(port, domain, platform).await {
             break v;
         }
         assert!(Instant::now() < deadline, "no ticker publish within 15s");
@@ -407,7 +431,7 @@ async fn wait_ticker_advances(port: u16, platform: &str) {
 
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if let Some(next) = read_lastplayed(port, platform).await
+        if let Some(next) = read_lastplayed(port, domain, platform).await
             && next != first
         {
             return;
@@ -462,6 +486,16 @@ async fn cold_boot_publishes_and_serves_current() {
     assert!(
         CLIPS.contains(&cur.as_str()),
         "current {cur:?} is not a bare corpus basename"
+    );
+    // The renamed route serves the same body as the legacy one (retried: a
+    // clip boundary can land between the two reads).
+    wait_for(
+        "/playout/current to agree with /vlc/current",
+        Duration::from_secs(5),
+        || {
+            let a = current(p.http);
+            (!a.is_empty() && a == current_at(p.http, "/playout/current")).then_some(())
+        },
     );
     // The RTSP RECORD handshake can trail readiness by a moment; retry.
     wait_for(
@@ -523,6 +557,16 @@ async fn resume_from_preseeded_lastplayed() {
         wait_ready(p.http);
         let cur = wait_current(p.http, "fallthrough clip", |c| !c.is_empty());
         assert!(CLIPS.contains(&cur.as_str()));
+    }
+
+    // Streams disagree: the `playout` record wins over the legacy `vlc` one.
+    seed_lastplayed_on(nport, "vlc", "youtube", "clip_b.mp4", 1_000).await;
+    seed_lastplayed_on(nport, "playout", "youtube", "clip_a.mp4", 1_000).await;
+    {
+        let p = start_playout(corpus(), Some(nport), mport, "youtube");
+        wait_ready(p.http);
+        let cur = wait_current(p.http, "playout-domain clip", |c| !c.is_empty());
+        assert_eq!(cur, "clip_a.mp4");
     }
 }
 
@@ -607,6 +651,19 @@ async fn commands_act_and_other_platform_is_isolated() {
         expected,
         "undecodable play.file changed state"
     );
+
+    // The renamed subject family dispatches the same verbs.
+    publish_command_on(
+        nport,
+        "playout",
+        "youtube",
+        "play.file",
+        r#"{"file":"clip_a.mp4"}"#,
+    )
+    .await;
+    wait_current(p.http, "playout-domain play.file target", |c| {
+        c == "clip_a.mp4"
+    });
 }
 
 /// Natural boundaries advance through the playlist and wrap — with 2s clips,
@@ -641,7 +698,7 @@ async fn map_only_plays_and_advances_without_a_relay() {
     wait_ready(p.http);
 
     let elapsed = wait_all_clips_seen(p.http, "clips to advance with no relay to publish to");
-    wait_ticker_advances(nport, "youtube").await;
+    wait_ticker_advances(nport, "vlc", "youtube").await;
 
     // With no sink pacing the pipeline to the clock, a map-only fakesink
     // consumes the corpus as fast as it decodes and the playhead the console
@@ -825,7 +882,8 @@ async fn lastplayed_ticker_advances() {
     let p = start_playout(corpus(), Some(nport), mport, "youtube");
     wait_ready(p.http);
 
-    wait_ticker_advances(nport, "youtube").await;
+    wait_ticker_advances(nport, "vlc", "youtube").await;
+    wait_ticker_advances(nport, "playout", "youtube").await;
 }
 
 /// ENCODER=passthrough splices the compressed corpus straight to MediaMTX —
