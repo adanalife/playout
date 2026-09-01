@@ -2,6 +2,20 @@
 
 <!-- towncrier release notes start -->
 
+## [v0.19.0] — 2026-09-01
+
+### Added
+
+- Serve every wire name under the `playout` token alongside the legacy `vlc` one: commands on `tripbot.<env>.playout.*`, the `TRIPBOT_PLAYOUT_LASTPLAYED` resume cache (read `playout`-first, written to both), and `/playout/current`. First wave of the coordinated `vlc` → `playout` rename; the legacy names stay until tripbot and the console have flipped. ([#155](https://github.com/adanalife/playout/pull/155))
+
+### Fixed
+
+- Recover unnumbered changelog fragments (from a merge racing `changelog-number.yml`) at collate time instead of letting them publish with no PR link. ([#152](https://github.com/adanalife/playout/pull/152))
+
+### Misc
+
+- Re-synced `contract.json` from tripbot, which now owns the per-platform `gateway-<platform>` Service names and the gateway HTTP port. Additive vocabulary only — playout reads neither key, so this keeps the daily drift gate green. ([#147](https://github.com/adanalife/playout/pull/147))
+
 ## [v0.18.2] — 2026-08-29
 
 ### Fixed
