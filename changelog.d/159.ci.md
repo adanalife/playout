@@ -1,0 +1,1 @@
+The changelog-fragment numbering in CI reads a repeat fragment's type correctly when `towncrier create` has appended its own counter suffix, instead of mistaking the counter for the type and producing a filename towncrier rejects.
