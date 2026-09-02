@@ -54,11 +54,6 @@ off-cluster viewers get TCP transport.
 - **HTTP** on `:8080`: `/health/live`, `/health/ready` (ready = pipeline
   PLAYING), `/version`, `/playout/current` (bare basename of the active clip),
   `/debug/pipeline` (live topology as Graphviz).
-- **Legacy wire names**: every name above is also served under the `vlc`
-  token vlc-server used — `tripbot.<env>.vlc.*` subjects,
-  `TRIPBOT_VLC_LASTPLAYED`, `/vlc/current` — because tripbot and the console
-  still speak it. Commands land on either; the cache is written to both and
-  read `playout`-first. The legacy set goes once every consumer has moved.
 - **Metrics**: OTLP push to Grafana Cloud, gated on
   `OTEL_EXPORTER_OTLP_ENDPOINT` so local runs export nothing.
 - **Watchdog**: an RTSP DESCRIBE probe every 30s, since `rtspclientsink` in

@@ -1,0 +1,1 @@
+Drop the legacy `vlc` wire names: `tripbot.<env>.vlc.*` commands are no longer subscribed, the `TRIPBOT_VLC_LASTPLAYED` cache is no longer written or read, and `/vlc/current` is gone. Every consumer speaks `playout` since tripbot 5.6.0 / tripbot-console 0.54.0. The old JetStream stream is deleted by hand per env.

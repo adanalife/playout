@@ -572,7 +572,7 @@ impl Player {
     }
 
     /// Basename of the active clip (`2018_0704_120000.MP4`), as served over
-    /// `/vlc/current`. None when nothing is playing.
+    /// `/playout/current`. None when nothing is playing.
     pub(crate) fn current_basename(&self) -> Option<String> {
         let index = self.clips.lock().unwrap().first()?.index;
         Some(self.basename_at(index))
