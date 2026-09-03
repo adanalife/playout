@@ -130,6 +130,11 @@ def emit_image_gate(
             # Cap the wait so a wedged/unschedulable probe fails the sync (pod
             # safe) instead of stalling PreSync forever.
             "activeDeadlineSeconds": 120,
+            # BeforeHookCreation only clears the previous gate at the next sync,
+            # so a finished (especially Failed) gate pod otherwise lingers
+            # indefinitely and clutters every pod-health read. 24h leaves the
+            # log readable the next day and reaps it after that.
+            "ttlSecondsAfterFinished": 86400,
             "template": {
                 "metadata": {"labels": labels},
                 "spec": {
