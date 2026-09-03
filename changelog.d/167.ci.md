@@ -1,0 +1,1 @@
+The release PR is staged (changelog built, CI fired) on every main push while its branch exists, not only on the runs where release-please itself changed it — the gap that let platform-gateway 1.27.1 merge with an unbuilt changelog and no checks.
