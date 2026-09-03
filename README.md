@@ -94,6 +94,6 @@ Trunk-based `main` + [release-please](https://github.com/googleapis/release-plea
    conventional commits, and collates the `changelog.d/` fragments into
    `CHANGELOG.md` on the PR branch.
 4. **To ship: squash-merge the release PR.** That tags `vX.Y.Z`, creates the
-   GitHub Release, and dispatches `release.yml` to build the image to GHCR. No
-   manual version/changelog steps — the version follows from the commit types
+   GitHub Release, and the tag fires `release.yml` to build the image to GHCR.
+   No manual version/changelog steps — the version follows from the commit types
    (`feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE` → major).
