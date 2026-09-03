@@ -2,6 +2,34 @@
 
 <!-- towncrier release notes start -->
 
+## [v1.0.0] — 2026-09-03
+
+### Added
+
+- Added an explicit all-rights-reserved `LICENSE`. The repo previously carried no license file, which already meant the same thing by default; the file removes the ambiguity. ([#154](https://github.com/adanalife/playout/pull/154))
+
+### Changed
+
+- Read the HTTP port from the contract's `playout_http` key (was `vlc_http`); the synced `contract.json` drops the `vlc_*` aliases. ([#156](https://github.com/adanalife/playout/pull/156))
+
+### Removed
+
+- Drop the legacy `vlc` wire names: `tripbot.<env>.vlc.*` commands are no longer subscribed, the `TRIPBOT_VLC_LASTPLAYED` cache is no longer written or read, and `/vlc/current` is gone. Every consumer speaks `playout` since tripbot 5.6.0 / tripbot-console 0.54.0. The old JetStream stream is deleted by hand per env. ([#157](https://github.com/adanalife/playout/pull/157))
+
+### Fixed
+
+- `task contract:sync` and `task platforms:sync` now find the sibling tripbot and platform-gateway checkouts when run from a git worktree instead of the main checkout. ([#158](https://github.com/adanalife/playout/pull/158))
+- Finished image-gate Job pods are now reaped 24h after completion instead of lingering until the next sync. ([#166](https://github.com/adanalife/playout/pull/166))
+
+### CI / Tooling
+
+- The changelog-fragment numbering in CI reads a repeat fragment's type correctly when `towncrier create` has appended its own counter suffix, instead of mistaking the counter for the type and producing a filename towncrier rejects. ([#159](https://github.com/adanalife/playout/pull/159))
+- The pull-request gates now name which gate failed, in the checks tab and in the run summary. ([#161](https://github.com/adanalife/playout/pull/161))
+- A pre-push hook now blocks a push whose branch adds no changelog fragment, catching it locally instead of in CI. ([#162](https://github.com/adanalife/playout/pull/162))
+- Add a pre-commit hook (run in CI too) that fails on any private-notes `vault/<dir>/` path in the tree. ([#163](https://github.com/adanalife/playout/pull/163))
+- The contract/platforms sync tasks refuse to copy from a sibling checkout that is behind `origin/main`. ([#164](https://github.com/adanalife/playout/pull/164))
+- release-please runs on the automation app token, so the release tag fires `release.yml` by itself (no explicit dispatch) and the Discord announcement only fires on a tag push, never on a re-deploy. ([#165](https://github.com/adanalife/playout/pull/165))
+
 ## [v0.19.0] — 2026-09-01
 
 ### Added
