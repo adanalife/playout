@@ -17,6 +17,7 @@ data:
   ENV: staging
   STREAM_PLATFORM: twitch
   DEPLOYMENT_ENVIRONMENT: stage-1
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://k8s-monitoring-alloy-receiver.monitoring.svc:4318
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -46,7 +47,7 @@ spec:
         app.kubernetes.io/instance: playout-twitch
         app.kubernetes.io/part-of: tripbot
       annotations:
-        adanalife.dev/config-hash: ad2a82aa67
+        adanalife.dev/config-hash: 7f5dcf34a0
     spec:
       securityContext:
         seccompProfile:
@@ -67,9 +68,6 @@ spec:
                 name: playout-twitch-config
             - secretRef:
                 name: sentry-playout
-                optional: true
-            - secretRef:
-                name: grafana-cloud-otlp
                 optional: true
           volumeMounts:
             - name: dashcam

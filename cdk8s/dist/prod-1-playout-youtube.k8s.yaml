@@ -17,6 +17,7 @@ data:
   ENV: production
   STREAM_PLATFORM: youtube
   DEPLOYMENT_ENVIRONMENT: prod-1
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://k8s-monitoring-alloy-receiver.monitoring.svc:4318
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -46,7 +47,7 @@ spec:
         app.kubernetes.io/instance: playout-youtube
         app.kubernetes.io/part-of: tripbot
       annotations:
-        adanalife.dev/config-hash: 863547481d
+        adanalife.dev/config-hash: 3d501f65bf
     spec:
       securityContext:
         seccompProfile:
@@ -67,9 +68,6 @@ spec:
                 name: playout-youtube-config
             - secretRef:
                 name: sentry-playout
-                optional: true
-            - secretRef:
-                name: grafana-cloud-otlp
                 optional: true
           volumeMounts:
             - name: dashcam

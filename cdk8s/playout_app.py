@@ -217,6 +217,13 @@ class PlayoutInstance(Construct):
             # playout's series match the shared dashboards' env filter, distinct
             # from ENV, which is the NATS subject env (production / staging).
             "DEPLOYMENT_ENVIRONMENT": env.namespace,
+            # The in-cluster Alloy OTLP collector, which fans app metrics out
+            # to VictoriaMetrics and to Grafana Cloud (it holds the cloud
+            # credential, so the pods carry none). The binary appends
+            # /v1/metrics and gates telemetry off when this is unset.
+            "OTEL_EXPORTER_OTLP_ENDPOINT": (
+                "http://k8s-monitoring-alloy-receiver.monitoring.svc:4318"
+            ),
         }
         cm_name = f"{name}-config"
         _obj(
@@ -272,10 +279,6 @@ class PlayoutInstance(Construct):
                 # Sentry DSN. Optional so the pod starts before the
                 # ExternalSecret syncs; the binary no-ops without SENTRY_DSN.
                 {"secretRef": {"name": SENTRY_SECRET, "optional": True}},
-                # Grafana Cloud OTLP endpoint + auth (OTEL_EXPORTER_OTLP_*),
-                # the same ESO secret tripbot materializes in this namespace.
-                # Optional for the same reason; telemetry gates off without it.
-                {"secretRef": {"name": "grafana-cloud-otlp", "optional": True}},
             ],
             "volumeMounts": [
                 {
