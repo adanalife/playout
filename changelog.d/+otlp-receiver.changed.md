@@ -1,0 +1,1 @@
+Metrics now export to the in-cluster Alloy OTLP receiver (`k8s-monitoring-alloy-receiver.monitoring.svc:4318`), which fans them out to VictoriaMetrics and Grafana Cloud, instead of pushing to Grafana Cloud directly. The `grafana-cloud-otlp` secret is no longer mounted into playout pods.

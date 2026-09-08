@@ -54,7 +54,8 @@ off-cluster viewers get TCP transport.
 - **HTTP** on `:8080`: `/health/live`, `/health/ready` (ready = pipeline
   PLAYING), `/version`, `/playout/current` (bare basename of the active clip),
   `/debug/pipeline` (live topology as Graphviz).
-- **Metrics**: OTLP push to Grafana Cloud, gated on
+- **Metrics**: OTLP push to the in-cluster Alloy receiver (which fans out to
+  VictoriaMetrics and Grafana Cloud), gated on
   `OTEL_EXPORTER_OTLP_ENDPOINT` so local runs export nothing.
 - **Watchdog**: an RTSP DESCRIBE probe every 30s, since `rtspclientsink` in
   RECORD mode reports PLAYING without proving data flow. Three consecutive

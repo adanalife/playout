@@ -1,4 +1,5 @@
-//! OTLP metrics push to Grafana Cloud — the Rust counterpart of the Go
+//! OTLP metrics push to the in-cluster Alloy receiver, which fans them out
+//! to VictoriaMetrics and Grafana Cloud — the Rust counterpart of the Go
 //! fleet's pkg/telemetry. Gates off when OTEL_EXPORTER_OTLP_ENDPOINT is
 //! unset (local runs, or the ESO secret not yet synced), like the Go fleet.
 //!
@@ -130,8 +131,9 @@ pub fn init(platform: &str, deployment_env: &str) -> Option<SdkMeterProvider> {
     // service_platform series label the dashboards filter on.
     let _ = PLATFORM_ATTR.set([KeyValue::new("service.platform", platform.to_string())]);
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok()?;
-    // Endpoint + auth headers passed explicitly: the env-var wiring is what
-    // the grafana-cloud-otlp secret ships, same contract as the Go fleet.
+    // Endpoint + auth headers passed explicitly, same env-var contract as the
+    // Go fleet. The in-cluster receiver needs no auth, so the header var is
+    // typically empty; it stays wired for a collector that does.
     let headers = parse_headers(&std::env::var("OTEL_EXPORTER_OTLP_HEADERS").unwrap_or_default());
     let exporter = match MetricExporter::builder()
         .with_http()
@@ -212,8 +214,8 @@ mod tests {
     use super::parse_headers;
 
     #[test]
-    fn parse_headers_reads_the_grafana_cloud_secret_shape() {
-        // What the grafana-cloud-otlp secret actually ships: one Authorization
+    fn parse_headers_reads_a_base64_credential_shape() {
+        // A credentialed collector's shape: one Authorization
         // header whose base64 value carries both `=` padding and its own
         // internal `=`. Splitting on the LAST `=`, or splitting on every one,
         // would truncate the credential into a silent 401.
