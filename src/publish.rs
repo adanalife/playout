@@ -57,10 +57,11 @@ fn make_encode_branch(
     // internal rtpbin holds `latency` (2s default) of stream even on a healthy
     // session, so a cap below that sheds frames continuously — and every shed
     // delta frame breaks readers' reference chains until the next IDR, which
-    // viewers see as constant artifacts. (The queue's default 1s time cap did
-    // exactly that.) 5s = that occupancy + headroom; time-bound only, since
-    // the default buffer/byte caps (200 buffers ≈ 3.3s at 60fps) would
-    // otherwise bind first and restate the same limit less directly.
+    // viewers see as constant artifacts. The queue's own 1s default sits under
+    // that occupancy, so it has to be raised rather than left. 5s = that
+    // occupancy + headroom; time-bound only, since the default buffer/byte caps
+    // (200 buffers ≈ 3.3s at 60fps) would otherwise bind first and restate the
+    // same limit less directly.
     queue.set_property("max-size-time", 5_000_000_000u64);
     queue.set_property("max-size-buffers", 0u32);
     queue.set_property("max-size-bytes", 0u32);
@@ -134,11 +135,11 @@ fn make_fakesink_branch() -> Result<Vec<gst::Element>> {
     sink.set_property("sync", true);
     // async=false: this sink must not gate preroll. rtspclientsink completes
     // its PAUSED transition without data (it only announces after PLAYING),
-    // so before this branch existed the pipeline hit PLAYING immediately and
-    // every clip mechanism — EOS boundaries, corrupt-clip recovery — ran
-    // while streaming. A data-gated sink here holds the pipeline in PAUSED
-    // until frames flow, and concat pad churn during that window (a corrupt
-    // first clip, a short clip draining to EOS) wedges preroll for good.
+    // so the pipeline reaches PLAYING immediately and every clip mechanism —
+    // EOS boundaries, corrupt-clip recovery — runs while streaming. A
+    // data-gated sink here would hold the pipeline in PAUSED until frames
+    // flow, and concat pad churn during that window (a corrupt first clip, a
+    // short clip draining to EOS) wedges preroll for good.
     sink.set_property("async", false);
     Ok(vec![queue, sink])
 }

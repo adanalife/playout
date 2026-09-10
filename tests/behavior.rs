@@ -803,9 +803,9 @@ async fn no_nats_still_plays_the_corpus() {
     // An unreachable NATS costs one deliberate 10s connect window before the
     // first clip spawns — the window buys a resume when NATS is merely slow to
     // come up. Measured at 11.6s to readiness. The budget is deliberately close
-    // to that: the stream-ensure and the resume read used to add a guaranteed
-    // 10s timeout each on this path, and a budget with room for them to come
-    // back would let that regress silently into 30s of dead air per restart.
+    // to that: neither the stream-ensure nor the resume read may add a blocking
+    // timeout of its own on this path, and a budget with room for two more
+    // would let that regress silently into 30s of dead air per restart.
     wait_for(
         "readiness with no control plane",
         Duration::from_secs(20),
