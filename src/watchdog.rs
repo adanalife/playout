@@ -199,6 +199,50 @@ mod tests {
         format!("rtsp://{addr}/dashcam")
     }
 
+    /// Serve `chunks` with a flush between each, so the reader has to loop.
+    /// A status line arriving in one packet is the easy case; TCP is free to
+    /// split it anywhere, and a reader that treats the first read as the whole
+    /// response calls a healthy relay dead.
+    async fn serve_chunks(chunks: &'static [&'static str]) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 512];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            for chunk in chunks {
+                sock.write_all(chunk.as_bytes()).await.unwrap();
+                sock.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        format!("rtsp://{addr}/dashcam")
+    }
+
+    #[tokio::test]
+    async fn describe_reads_a_status_line_split_across_packets() {
+        let split = serve_chunks(&["RTSP/1.0 ", "200 OK\r\nCSeq: 1\r\n\r\n"]).await;
+        assert!(describe(&split).await.is_ok());
+
+        // The same split against a 404: a reader that stopped at the first
+        // packet would see "RTSP/1.0 " and reject a *free* path as an error,
+        // which is the arm `path_free` reads to decide it may publish.
+        let split_404 = serve_chunks(&["RTSP/1.0 ", "404 Not Found\r\n\r\n"]).await;
+        assert!(path_free(&split_404).await);
+    }
+
+    #[tokio::test]
+    async fn describe_reports_a_connection_closed_before_the_status_line() {
+        // A relay that accepts and hangs up mid-response is dead, not healthy —
+        // the read loop must end on the zero-length read rather than spin.
+        let truncated = serve_chunks(&["RTSP/1.0 "]).await;
+        let err = describe(&truncated).await.unwrap_err();
+        assert!(
+            err.to_string().contains("closed before status line"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn describe_accepts_200_rejects_404() {
         let ok = serve_one("RTSP/1.0 200 OK\r\nCSeq: 1\r\n\r\n").await;
