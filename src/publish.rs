@@ -323,6 +323,50 @@ impl Output {
 mod tests {
     use super::*;
 
+    /// A pipeline with just the tee and the permanent fakesink — an `Output`
+    /// that has never held the publish path.
+    fn map_only_output() -> Arc<Output> {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let tee = gst::ElementFactory::make("tee").build().unwrap();
+        pipeline.add(&tee).unwrap();
+        Output::new(
+            pipeline,
+            tee,
+            "passthrough".to_string(),
+            "rtsp://localhost:8554/dashcam".to_string(),
+        )
+        .unwrap()
+    }
+
+    /// `on_error` decides whether a bus error is survivable, so a false
+    /// positive is the dangerous direction: an encoder or pipeline fault
+    /// absorbed as a publish blip leaves the pod up with a broken pipeline and
+    /// nothing to show for it. It may only claim errors sourced under the
+    /// publish branch — and with no branch attached, that is nothing at all.
+    #[test]
+    fn on_error_refuses_an_error_it_does_not_own() {
+        let out = map_only_output();
+        let stranger = gst::ElementFactory::make("fakesink").build().unwrap();
+        assert!(!out.on_error(stranger.upcast_ref::<gst::Object>()));
+
+        // The pacing fakesink is inside the same pipeline and is not the
+        // publish branch: an error there is a real fault, not a lost publish.
+        let pacing = out
+            .pipeline
+            .iterate_elements()
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|e| e.factory().is_some_and(|f| f.name() == "fakesink"))
+            .expect("the permanent fakesink is wired by Output::new");
+        assert!(!out.on_error(pacing.upcast_ref::<gst::Object>()));
+
+        // Refusing left the publish state alone — nothing to detach, and the
+        // acquirer has no reason to be woken.
+        assert!(!out.publishing.load(Ordering::SeqCst));
+        assert!(out.branch.lock().unwrap().is_empty());
+    }
+
     /// The publish must not negotiate UDP. rtspclientsink offers UDP ahead of
     /// TCP by default and MediaMTX accepts it, so dropping the property is
     /// silent everywhere else: the pipeline builds, the session establishes,
