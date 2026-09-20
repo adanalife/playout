@@ -223,7 +223,11 @@ impl Control {
             // including seek, which takes its own path below.
             crate::telemetry::COMMANDS.add(
                 1,
-                &crate::telemetry::attrs_with(opentelemetry::KeyValue::new("verb", verb.clone())),
+                &[
+                    crate::telemetry::attrs(),
+                    &[opentelemetry::KeyValue::new("verb", verb.clone())],
+                ]
+                .concat(),
             );
             // seek resolves its landing spot before touching the pipeline:
             // the walk discovers clip durations (file I/O), which must stay
