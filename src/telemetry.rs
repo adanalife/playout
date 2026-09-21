@@ -55,13 +55,6 @@ pub fn attrs() -> &'static [KeyValue] {
     PLATFORM_ATTR.get().map_or(&[], |a| a.as_slice())
 }
 
-/// `attrs()` plus one call-site attribute (e.g. a command verb).
-pub fn attrs_with(extra: KeyValue) -> Vec<KeyValue> {
-    let mut v = attrs().to_vec();
-    v.push(extra);
-    v
-}
-
 pub static CLIP_SPAWNS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter("playout")
         .u64_counter("playout_clip_spawns_total")
