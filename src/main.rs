@@ -169,9 +169,17 @@ async fn run(platform: String) -> Result<()> {
     );
 
     let passthrough = encoder_name == "passthrough";
-    if passthrough && output != "rtsp" {
-        bail!("OUTPUT={output} needs decoded video; ENCODER=passthrough supports only rtsp");
-    }
+    // Which branches the tee feeds. The window needs decoded video, so
+    // passthrough can only publish.
+    let (publish, window) = match output.as_str() {
+        "rtsp" => (true, false),
+        "window" | "both" if passthrough => {
+            bail!("OUTPUT={output} needs decoded video; ENCODER=passthrough supports only rtsp")
+        }
+        "window" => (false, true),
+        "both" => (true, true),
+        _ => bail!("OUTPUT must be rtsp, window, or both (got {output})"),
+    };
 
     gst::init()?;
     let pipeline = gst::Pipeline::new();
@@ -254,10 +262,6 @@ async fn run(platform: String) -> Result<()> {
     // on the permanent fakesink, which keeps the pipeline playing so the
     // console map still advances off the NATS playhead, and let the acquirer
     // attach the publish the moment the path frees.
-    let publish = output == "rtsp" || output == "both";
-    if !publish && output != "window" {
-        bail!("OUTPUT must be rtsp, window, or both (got {output})");
-    }
     let out = publish
         .then(|| {
             publish::Output::new(
@@ -277,7 +281,7 @@ async fn run(platform: String) -> Result<()> {
         }
         tokio::spawn(Arc::clone(out).run_acquirer());
     }
-    if output == "window" || output == "both" {
+    if window {
         let branch = make_window_branch()?;
         let refs: Vec<&gst::Element> = branch.iter().collect();
         pipeline.add_many(&refs)?;
