@@ -109,6 +109,20 @@ fn is_frame_gap(prev_ns: u64, ts_ns: u64, threshold_ns: u64) -> bool {
     prev_ns != u64::MAX && ts_ns > prev_ns.saturating_add(threshold_ns)
 }
 
+/// Which branches the tee feeds for OUTPUT, as `(publish, window)`. The window
+/// needs decoded video, so passthrough can only publish.
+fn tee_branches(output: &str, passthrough: bool) -> Result<(bool, bool)> {
+    Ok(match output {
+        "rtsp" => (true, false),
+        "window" | "both" if passthrough => {
+            bail!("OUTPUT={output} needs decoded video; ENCODER=passthrough supports only rtsp")
+        }
+        "window" => (false, true),
+        "both" => (true, true),
+        _ => bail!("OUTPUT must be rtsp, window, or both (got {output})"),
+    })
+}
+
 fn main() -> Result<()> {
     // Reads SENTRY_DSN from the environment; unset (local runs) leaves the
     // client disabled. The environment tag carries the deploy-env id so
@@ -169,17 +183,7 @@ async fn run(platform: String) -> Result<()> {
     );
 
     let passthrough = encoder_name == "passthrough";
-    // Which branches the tee feeds. The window needs decoded video, so
-    // passthrough can only publish.
-    let (publish, window) = match output.as_str() {
-        "rtsp" => (true, false),
-        "window" | "both" if passthrough => {
-            bail!("OUTPUT={output} needs decoded video; ENCODER=passthrough supports only rtsp")
-        }
-        "window" => (false, true),
-        "both" => (true, true),
-        _ => bail!("OUTPUT must be rtsp, window, or both (got {output})"),
-    };
+    let (publish, window) = tee_branches(&output, passthrough)?;
 
     gst::init()?;
     let pipeline = gst::Pipeline::new();
@@ -442,7 +446,7 @@ async fn run(platform: String) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_frame_gap, scan_video_dir, sends_to_sentry};
+    use super::{is_frame_gap, scan_video_dir, sends_to_sentry, tee_branches};
 
     #[test]
     fn only_prod_reports_to_sentry() {
@@ -452,6 +456,18 @@ mod tests {
         // The NATS subject env is not a deploy-env id — if the tag ever
         // regresses to it, this env must not start sending.
         assert!(!sends_to_sentry("production"));
+    }
+
+    #[test]
+    fn output_picks_tee_branches_and_passthrough_only_publishes() {
+        assert_eq!(tee_branches("rtsp", false).unwrap(), (true, false));
+        assert_eq!(tee_branches("window", false).unwrap(), (false, true));
+        assert_eq!(tee_branches("both", false).unwrap(), (true, true));
+        assert_eq!(tee_branches("rtsp", true).unwrap(), (true, false));
+        assert!(tee_branches("window", true).is_err());
+        assert!(tee_branches("both", true).is_err());
+        assert!(tee_branches("RTSP", false).is_err());
+        assert!(tee_branches("", false).is_err());
     }
 
     #[test]
