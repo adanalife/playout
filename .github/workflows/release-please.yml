@@ -77,6 +77,10 @@ jobs:
       # unbuilt changelog and, because the app-token push is what fires its
       # pull_request events, no CI at all (platform-gateway 1.27.1). curl rather
       # than `gh`: the ARC runner image ships no gh CLI.
+      #
+      # The branch carries a `--components--playout` suffix: the rust release
+      # type names the component after the crate, and `include-component-in-tag:
+      # false` keeps it out of the tag only, not the branch name.
       - name: Check for an open release PR branch
         if: ${{ !steps.release.outputs.release_created }}
         id: release-branch
@@ -84,7 +88,7 @@ jobs:
           code=$(curl -sS -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/release-please--branches--main")
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/release-please--branches--main--components--playout")
           echo "Release branch lookup: HTTP $code"
           echo "exists=$([ "$code" = 200 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
         env:
@@ -94,7 +98,7 @@ jobs:
         if: ${{ steps.release-branch.outputs.exists == 'true' }}
         uses: actions/checkout@v7
         with:
-          ref: release-please--branches--main
+          ref: release-please--branches--main--components--playout
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
@@ -131,4 +135,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit --allow-empty -m "chore: build changelog for $VERSION"
-          git push origin HEAD:release-please--branches--main
+          git push origin HEAD:release-please--branches--main--components--playout
