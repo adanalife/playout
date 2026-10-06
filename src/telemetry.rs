@@ -241,4 +241,50 @@ mod tests {
             [("Authorization".into(), "Bearer abc".into())]
         );
     }
+
+    /// Every Prometheus series this file's instruments export, read off the
+    /// instrument builders: a counter gains `_total` if it lacks it, a
+    /// histogram splits into `_bucket`/`_count`/`_sum`, a gauge keeps its name.
+    // ponytail: scans this file's source; an instrument built in another file
+    // needs this test to read that file too.
+    fn series_names() -> Vec<String> {
+        let src = include_str!("telemetry.rs");
+        let mut names = Vec::new();
+        for kind in ["_counter(\"", "_gauge(\"", "_histogram(\""] {
+            for (i, _) in src.match_indices(kind) {
+                let rest = &src[i + kind.len()..];
+                let name = &rest[..rest.find('"').unwrap()];
+                match kind {
+                    "_counter(\"" if !name.ends_with("_total") => {
+                        names.push(format!("{name}_total"))
+                    }
+                    "_histogram(\"" => {
+                        names.extend(["_bucket", "_count", "_sum"].map(|s| format!("{name}{s}")))
+                    }
+                    _ => names.push(name.to_string()),
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// infra's alert check reads the committed metrics.json; renaming a metric
+    /// without updating it would let an alert on the old name go quiet.
+    #[test]
+    fn metrics_json_lists_every_instrument() {
+        let doc: serde_json::Value = serde_json::from_str(include_str!("../metrics.json")).unwrap();
+        let committed: Vec<String> = doc["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            committed,
+            series_names(),
+            "metrics.json is stale: set its \"metrics\" to the right-hand list"
+        );
+    }
 }

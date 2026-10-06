@@ -1,0 +1,1 @@
+`metrics.json` lists every Prometheus series playout exports, and a test fails when it disagrees with the instrument builders in `src/telemetry.rs`. infra syncs it, so an alert that names a playout metric that no longer exists fails before merge.
