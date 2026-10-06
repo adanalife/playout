@@ -86,8 +86,8 @@ the passthrough-vs-encode wiring on a running pod. Or point
 Trunk-based `main` + [release-please](https://github.com/googleapis/release-please), with towncrier changelog fragments:
 
 1. Feature PRs target `main` (squash-merge, conventional title); each adds a
-   fragment (`task changelog:add TYPE=<type>` — no PR number needed, CI fills it
-   in on push) or carries the `skip-changelog` label.
+   fragment (`task changelog:add TYPE=<type>` — no PR number needed, the release
+   fills it in) or carries the `skip-changelog` label.
 2. `dev-image.yml` floats `ghcr.io/adanalife/playout:main` on every main push —
    what stage deploys.
 3. `release-please.yml` maintains a standing release PR that bumps the version,
