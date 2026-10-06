@@ -144,11 +144,11 @@ fn main() -> Result<()> {
     // twitch vs youtube errors filterable within it, matching the Go fleet.
     let platform = env_or("STREAM_PLATFORM", "youtube");
     sentry::configure_scope(|scope| scope.set_tag("platform", &platform));
-    run(platform)
+    run(platform, deploy_env)
 }
 
 #[tokio::main]
-async fn run(platform: String) -> Result<()> {
+async fn run(platform: String, deployment_env: String) -> Result<()> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     tracing_subscriber::registry()
@@ -167,10 +167,8 @@ async fn run(platform: String) -> Result<()> {
     let encoder_name = env_or("ENCODER", "x264enc");
     let nats_env = env_or("ENV", "development");
     let nats_url = env_or("NATS_URL", "nats://localhost:4222");
-    // The k8s namespace, so playout's series share the dashboards' env filter
-    // with the Go fleet's.
-    let deployment_env = deployment_env();
-
+    // The deploy env labels playout's series, so they share the dashboards'
+    // env filter with the Go fleet's.
     let meter_provider = telemetry::init(&platform, &deployment_env);
 
     let files = scan_video_dir(&video_dir)?;
