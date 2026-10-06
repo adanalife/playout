@@ -286,11 +286,7 @@ async fn run(platform: String) -> Result<()> {
         tokio::spawn(Arc::clone(out).run_acquirer());
     }
     if window {
-        let branch = make_window_branch()?;
-        let refs: Vec<&gst::Element> = branch.iter().collect();
-        pipeline.add_many(&refs)?;
-        gst::Element::link_many(&refs)?;
-        tee.link(&branch[0])?;
+        publish::link_branch(&pipeline, &tee, &make_window_branch()?)?;
     }
 
     let player: SharedPlayer = Arc::new(Player {
