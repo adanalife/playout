@@ -17,8 +17,8 @@ use crate::telemetry;
 /// and the output running time it went active (for the playhead position).
 pub(crate) struct Clip {
     bin: gst::Element,
-    /// concat sink pad, set once the decode bin exposes its src pad.
-    pad: Option<gst::Pad>,
+    /// concat sink pad this clip feeds, requested when the clip spawns.
+    pad: gst::Pad,
     index: usize,
     /// Seek offset this clip started at, ms (0 = top of clip).
     offset_ms: i64,
@@ -349,7 +349,7 @@ impl Player {
         // pad-added always finds it.
         self.clips.lock().unwrap().push(Clip {
             bin: decode.clone(),
-            pad: Some(sinkpad),
+            pad: sinkpad,
             index,
             offset_ms,
             start_rt: None,
@@ -466,9 +466,7 @@ impl Player {
         // before Null, or the bin's streaming thread parked in concat holds
         // the stream lock set_state needs. Releasing the *active* pad is also
         // what makes concat cut to the prerolled clip.
-        if let Some(pad) = failed.pad {
-            self.concat.release_request_pad(&pad);
-        }
+        self.concat.release_request_pad(&failed.pad);
         failed.bin.set_state(gst::State::Null).ok();
         self.pipeline.remove(&failed.bin).ok();
         let next = if was_active {
@@ -516,9 +514,7 @@ impl Player {
             // turn, holding its pad's stream lock — set_state(Null) needs
             // that lock to deactivate the pad and deadlocks unless the
             // release wakes the waiter first.
-            if let Some(pad) = c.pad {
-                self.concat.release_request_pad(&pad);
-            }
+            self.concat.release_request_pad(&c.pad);
             c.bin.set_state(gst::State::Null).ok();
             self.pipeline.remove(&c.bin).ok();
         }
