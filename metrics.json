@@ -1,0 +1,15 @@
+{
+  "_comment": "Every Prometheus series name playout's instruments export, as stored after the OTLP translation. Hand-maintained; a test in src/telemetry.rs fails when it disagrees with the instrument builders. infra syncs it so an alert rule naming a playout metric that no longer exists fails pre-merge.",
+  "metrics": [
+    "playout_clip_errors_total",
+    "playout_clip_spawns_total",
+    "playout_commands_total",
+    "playout_nats_connected",
+    "playout_output_frame_gaps_total",
+    "playout_output_frames_total",
+    "playout_pipeline_running_time_ms",
+    "playout_playhead_position_ms",
+    "playout_publish_errors_total",
+    "playout_publish_gap_seconds"
+  ]
+}
