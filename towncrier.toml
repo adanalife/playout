@@ -1,9 +1,13 @@
 # Changelog fragments, assembled by towncrier at release time.
 #
-# Every feature/fix PR drops a fragment in changelog.d/ named <PR>.<type>.md
-# (e.g. 42.fix.md). Run via uvx — no project dependency:
+# Every feature/fix PR drops a "+" placeholder fragment in changelog.d/
+# (towncrier's issue-less convention) — you rarely know the PR number when
+# branching. Placeholders stay unnumbered on main; at release,
+# scripts/number-fragments.sh renames each to <PR#>.<type>.md (e.g. 42.fix.md)
+# from the squash commit that added it, so each entry links to its PR. Run via
+# uvx — no project dependency:
 #
-#   task changelog:add TYPE=fix                                # scaffold
+#   task changelog:add TYPE=fix    # writes changelog.d/+<branch>-<hex>.fix.md
 #   task changelog:preview                                     # pending notes
 #   task changelog:build VERSION=1.2.0                         # collate
 #

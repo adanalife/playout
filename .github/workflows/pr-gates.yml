@@ -9,10 +9,6 @@
 # safe to mark required in branch protection — a path-filtered *workflow* would
 # hang as "Expected" and block merges instead. Expensive steps stay cheap by
 # checking the PR's changed paths first.
-#
-# changelog-number.yml stays a separate workflow: it needs `contents: write` to
-# push the fragment rename, and job-level permissions apply to every step, so
-# folding it in here would put a write token in scope for the read-only gates.
 name: pr-gates
 
 on:
