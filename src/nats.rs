@@ -24,15 +24,11 @@ fn subject(env: &str, verb: &str) -> String {
     format!("tripbot.{env}.playout.{verb}")
 }
 
-// Command payloads — the fields playout acts on. serde ignores the envelope's
-// emitted_at and any other keys.
+// Payloads — the fields playout acts on. serde ignores the envelope's
+// emitted_at and any other keys. One shape covers play.file, play.at, and the
+// lastplayed record: a clip plus an optional offset (absent = top of clip).
 #[derive(Deserialize)]
-struct PlayFile {
-    file: String,
-}
-
-#[derive(Deserialize)]
-struct PlayFileAt {
+struct FileAt {
     file: String,
     #[serde(default)]
     position_ms: i64,
@@ -48,13 +44,6 @@ struct NArg {
 struct DeltaArg {
     #[serde(default)]
     delta_ms: i64,
-}
-
-#[derive(Deserialize)]
-struct LastPlayed {
-    file: String,
-    #[serde(default)]
-    position_ms: i64,
 }
 
 pub struct Control {
@@ -174,7 +163,7 @@ impl Control {
             .get_last_raw_message_by_subject(&self.lastplayed_subject())
             .await
             .ok()?;
-        let ev: LastPlayed = serde_json::from_slice(&msg.payload).ok()?;
+        let ev: FileAt = serde_json::from_slice(&msg.payload).ok()?;
         let index = player.find(&ev.file)?;
         info!(file = %ev.file, position_ms = ev.position_ms, "resuming");
         Some((index, ev.position_ms))
@@ -307,13 +296,8 @@ fn decode<T: serde::de::DeserializeOwned>(verb: &str, payload: &[u8]) -> Option<
 fn dispatch(player: &SharedPlayer, verb: &str, payload: &[u8]) {
     match verb {
         "play.random" => player.play_random(),
-        "play.file" => {
-            if let Some(p) = decode::<PlayFile>(verb, payload) {
-                player.play_file(&p.file);
-            }
-        }
-        "play.at" => {
-            if let Some(p) = decode::<PlayFileAt>(verb, payload) {
+        "play.file" | "play.at" => {
+            if let Some(p) = decode::<FileAt>(verb, payload) {
                 player.play_at(&p.file, p.position_ms);
             }
         }

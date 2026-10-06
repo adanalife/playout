@@ -537,17 +537,12 @@ impl Player {
         self.play_index(self.random_index(), 0);
     }
 
-    pub(crate) fn play_file(self: &Arc<Self>, name: &str) {
-        match self.find(name) {
-            Some(i) => self.play_index(i, 0),
-            None => warn!(file = name, "play.file: not in playlist"),
-        }
-    }
-
+    /// play.file and play.at: the clip named `name`, from `position_ms` in
+    /// (0 = top of clip).
     pub(crate) fn play_at(self: &Arc<Self>, name: &str, position_ms: i64) {
         match self.find(name) {
             Some(i) => self.play_index(i, position_ms),
-            None => warn!(file = name, "play.at: not in playlist"),
+            None => warn!(file = name, position_ms, "play: not in playlist"),
         }
     }
 
