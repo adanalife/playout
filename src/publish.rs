@@ -144,6 +144,22 @@ fn make_fakesink_branch() -> Result<Vec<gst::Element>> {
     Ok(vec![queue, sink])
 }
 
+/// Add a branch's elements to the pipeline, chain them in order, and feed the
+/// first one from a fresh tee request pad. Leaves the elements' states alone:
+/// a branch added before the pipeline starts follows it up, and one attached
+/// mid-stream is started by its caller.
+pub(crate) fn link_branch(
+    pipeline: &gst::Pipeline,
+    tee: &gst::Element,
+    elements: &[gst::Element],
+) -> Result<()> {
+    let refs: Vec<&gst::Element> = elements.iter().collect();
+    pipeline.add_many(&refs)?;
+    gst::Element::link_many(&refs)?;
+    tee.link(&elements[0])?;
+    Ok(())
+}
+
 pub(crate) struct Output {
     pipeline: gst::Pipeline,
     tee: gst::Element,
@@ -177,11 +193,7 @@ impl Output {
         rtsp_url: String,
     ) -> Result<Arc<Self>> {
         drop(make_encode_branch(&encoder_name, &rtsp_url, None)?);
-        let fakesink = make_fakesink_branch()?;
-        let refs: Vec<&gst::Element> = fakesink.iter().collect();
-        pipeline.add_many(&refs)?;
-        gst::Element::link_many(&refs)?;
-        tee.link(&fakesink[0])?;
+        link_branch(&pipeline, &tee, &make_fakesink_branch()?)?;
         Ok(Arc::new(Self {
             pipeline,
             tee,
@@ -216,10 +228,7 @@ impl Output {
         let gap_start = self.gap_start.lock().unwrap().take();
         let mut attach = || -> Result<()> {
             let elements = make_encode_branch(&self.encoder_name, &self.rtsp_url, gap_start)?;
-            let refs: Vec<&gst::Element> = elements.iter().collect();
-            self.pipeline.add_many(&refs)?;
-            gst::Element::link_many(&refs)?;
-            self.tee.link(&elements[0])?;
+            link_branch(&self.pipeline, &self.tee, &elements)?;
             // Publish the branch before starting it: a sink that errors during
             // its state change must already be classifiable as the branch's.
             *branch = elements.clone();
