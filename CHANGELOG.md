@@ -2,6 +2,59 @@
 
 <!-- towncrier release notes start -->
 
+## [v1.1.0] — 2026-10-08
+
+### Added
+
+- Added an explicit all-rights-reserved `LICENSE`. The repo previously carried no license file, which already meant the same thing by default; the file removes the ambiguity. ([#154](https://github.com/adanalife/playout/pull/154))
+- `metrics.json` lists every Prometheus series playout exports, and a test fails when it disagrees with the instrument builders in `src/telemetry.rs`. infra syncs it, so an alert that names a playout metric that no longer exists fails before merge. ([#188](https://github.com/adanalife/playout/pull/188))
+- The playlist knows its corpora: clips under `s2/` and `s2fast/` are their own corpus, and the ambient rotation draws only from a mode set by `CORPORA` (default `s1`) and replaced live by the new `playlist.mode` command. `play.random` takes an optional `corpus` to sneak into a block outside the mode, which plays to its end and then returns; `skip`/`back` count only clips in the mode. ([#192](https://github.com/adanalife/playout/pull/192))
+
+### Changed
+
+- Read the HTTP port from the contract's `playout_http` key (was `vlc_http`); the synced `contract.json` drops the `vlc_*` aliases. ([#156](https://github.com/adanalife/playout/pull/156))
+- Metrics now export to the in-cluster Alloy OTLP receiver (`k8s-monitoring-alloy-receiver.monitoring.svc:4318`), which fans them out to VictoriaMetrics and Grafana Cloud, instead of pushing to Grafana Cloud directly. The `grafana-cloud-otlp` secret is no longer mounted into playout pods. ([#170](https://github.com/adanalife/playout/pull/170))
+
+### Removed
+
+- Drop the legacy `vlc` wire names: `tripbot.<env>.vlc.*` commands are no longer subscribed, the `TRIPBOT_VLC_LASTPLAYED` cache is no longer written or read, and `/vlc/current` is gone. Every consumer speaks `playout` since tripbot 5.6.0 / tripbot-console 0.54.0. The old JetStream stream is deleted by hand per env. ([#157](https://github.com/adanalife/playout/pull/157))
+
+### Fixed
+
+- `task contract:sync` and `task platforms:sync` now find the sibling tripbot and platform-gateway checkouts when run from a git worktree instead of the main checkout. ([#158](https://github.com/adanalife/playout/pull/158))
+- Finished image-gate Job pods are now reaped 24h after completion instead of lingering until the next sync. ([#166](https://github.com/adanalife/playout/pull/166))
+
+### Security
+
+- Bump rustls to 0.23.45 to clear RUSTSEC-2026-0285 (TLS 1.3 handshake messages accepted across encryption level boundaries). ([#174](https://github.com/adanalife/playout/pull/174))
+
+### CI / Tooling
+
+- The changelog-fragment numbering in CI reads a repeat fragment's type correctly when `towncrier create` has appended its own counter suffix, instead of mistaking the counter for the type and producing a filename towncrier rejects. ([#159](https://github.com/adanalife/playout/pull/159))
+- The pull-request gates now name which gate failed, in the checks tab and in the run summary. ([#161](https://github.com/adanalife/playout/pull/161))
+- A pre-push hook now blocks a push whose branch adds no changelog fragment, catching it locally instead of in CI. ([#162](https://github.com/adanalife/playout/pull/162))
+- Add a pre-commit hook (run in CI too) that fails on any private-notes `vault/<dir>/` path in the tree. ([#163](https://github.com/adanalife/playout/pull/163))
+- The contract/platforms sync tasks refuse to copy from a sibling checkout that is behind `origin/main`. ([#164](https://github.com/adanalife/playout/pull/164))
+- release-please runs on the automation app token, so the release tag fires `release.yml` by itself (no explicit dispatch) and the Discord announcement only fires on a tag push, never on a re-deploy. ([#165](https://github.com/adanalife/playout/pull/165))
+- The release PR is staged (changelog built, CI fired) on every main push while its branch exists, not only on the runs where release-please itself changed it — the gap that let platform-gateway 1.27.1 merge with an unbuilt changelog and no checks. ([#167](https://github.com/adanalife/playout/pull/167))
+- The private-notes pre-commit hook now matches prose references as well as `vault/<dir>/` paths. ([#168](https://github.com/adanalife/playout/pull/168))
+- The RTSP DESCRIBE reader is now tested against a status line split across packets and against a relay that hangs up mid-response — the read loop had no test that made it iterate. ([#172](https://github.com/adanalife/playout/pull/172))
+- The publish branch's bus-error handler is now tested for the errors it must refuse, so a fault sourced elsewhere in the pipeline cannot be absorbed as a lost publish. ([#172](https://github.com/adanalife/playout/pull/172))
+- The transitive `chacha20` dependency moves off a yanked release, clearing the one standing warning in `cargo audit`'s output. ([#177](https://github.com/adanalife/playout/pull/177))
+- Unit-test the OUTPUT × ENCODER validation: which tee branches each OUTPUT feeds, and that passthrough refuses the window outputs. ([#186](https://github.com/adanalife/playout/pull/186))
+- Changelog fragments are numbered at release time from the squash commit that added them, instead of by a CI commit pushed onto every PR, and the release PR now actually receives its built changelog. ([#187](https://github.com/adanalife/playout/pull/187))
+
+### Misc
+
+- Three comments rewritten in the present tense: two in the publish branch and one in the no-NATS behaviour test narrated the changes that produced them rather than the constraints that hold now. ([#171](https://github.com/adanalife/playout/pull/171))
+- Collapse two redundancies: `STREAM_PLATFORM` is read once and passed into `run`, and the single-caller `telemetry::attrs_with` helper is inlined at its call site. ([#175](https://github.com/adanalife/playout/pull/175))
+- An illegal `OUTPUT` is refused before the pipeline is built, in one check alongside the passthrough rule. ([#179](https://github.com/adanalife/playout/pull/179))
+- `EnvConfig` requires `nats_env`, `platforms`, `encoder` and `cpu_request`: every env sets them, so a default could only mislead. ([#180](https://github.com/adanalife/playout/pull/180))
+- Fold the three identical clip-plus-offset payloads (play.file, play.at, the lastplayed record) into one, and route play.file through play.at with a zero offset. ([#189](https://github.com/adanalife/playout/pull/189))
+- Read the deploy env once at startup and hand it to the runtime, instead of reading it separately for Sentry and for telemetry. ([#190](https://github.com/adanalife/playout/pull/190))
+- Share one helper for attaching a branch to the tee across the window preview, the pacing fakesink, and the publish branch. ([#190](https://github.com/adanalife/playout/pull/190))
+- A clip holds the concat pad it feeds directly, since it is requested the moment the clip spawns. ([#191](https://github.com/adanalife/playout/pull/191))
+
 ## [v0.19.0] — 2026-09-01
 
 ### Added
