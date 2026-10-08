@@ -89,6 +89,25 @@ fn scan_video_dir(dir: &str) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// The ambient mode at boot, from `CORPORA` (comma-separated corpus names).
+/// A restart with no word from tripbot lands here, so it must never be a set
+/// with nothing to play: unknown names are dropped, and a set matching no
+/// clip falls back to every corpus the playlist holds.
+fn boot_mode(spec: &str, corpora: &[&'static str]) -> Vec<&'static str> {
+    let names: Vec<&str> = spec.split(',').collect();
+    let mode = player::parse_corpora(&names);
+    if corpora.iter().any(|c| mode.contains(c)) {
+        return mode;
+    }
+    let present = player::parse_corpora(corpora);
+    warn!(
+        CORPORA = spec,
+        ?present,
+        "CORPORA matches no clip; playing every corpus"
+    );
+    present
+}
+
 /// Local preview branch: render decoded video to a desktop window instead of
 /// publishing it. ponytail: this and the `OUTPUT=window|both` arms stay wired in
 /// every build so eyeballing the pipeline on a laptop is an env var away, never a
@@ -172,9 +191,15 @@ async fn run(platform: String, deployment_env: String) -> Result<()> {
     let meter_provider = telemetry::init(&platform, &deployment_env);
 
     let files = scan_video_dir(&video_dir)?;
+    let corpora: Vec<&'static str> = files
+        .iter()
+        .map(|f| player::corpus_of(f.strip_prefix(&video_dir).unwrap_or(f)))
+        .collect();
+    let mode = boot_mode(&env_or("CORPORA", "s1"), &corpora);
     info!(
         clips = files.len(),
         video_dir = %video_dir,
+        ?mode,
         output = %output,
         encoder = %encoder_name,
         "playlist ready"
@@ -291,6 +316,9 @@ async fn run(platform: String, deployment_env: String) -> Result<()> {
         pipeline: pipeline.clone(),
         concat,
         files,
+        corpora,
+        mode: Mutex::new(mode),
+        riding: Mutex::new(None),
         clips: Mutex::new(Vec::new()),
         passthrough,
         recoveries: AtomicUsize::new(0),
@@ -312,7 +340,7 @@ async fn run(platform: String, deployment_env: String) -> Result<()> {
     // clean deploy replays the same first clip on stream.
     let (first, offset) = resume.unwrap_or_else(|| (player.random_index(), 0));
     player.spawn(first, offset);
-    player.spawn((first + 1) % player.files.len(), 0);
+    player.spawn(player.next_after(first), 0);
 
     telemetry::spawn_recorder(player.clone());
     tokio::spawn(http::run(player.clone()));

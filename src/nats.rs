@@ -40,6 +40,19 @@ struct NArg {
     n: i32,
 }
 
+/// play.random: an optional corpus to draw from instead of the mode.
+#[derive(Deserialize)]
+struct RandomArg {
+    #[serde(default)]
+    corpus: Option<String>,
+}
+
+/// playlist.mode: the corpora the ambient rotation draws from.
+#[derive(Deserialize)]
+struct ModeArg {
+    corpora: Vec<String>,
+}
+
 #[derive(Deserialize)]
 struct DeltaArg {
     #[serde(default)]
@@ -178,7 +191,8 @@ impl Control {
     /// publishes. The leaf keeps platforms isolated: a Twitch-triggered skip
     /// must never advance the YouTube stream sharing the env's NATS.
     pub async fn run_commands(self: Arc<Self>, player: SharedPlayer) {
-        const VERBS: [&str; 6] = [
+        const VERBS: [&str; 7] = [
+            "playlist.mode",
             "play.random",
             "play.file",
             "play.at",
@@ -295,7 +309,21 @@ fn decode<T: serde::de::DeserializeOwned>(verb: &str, payload: &[u8]) -> Option<
 /// Map a command verb + payload to a Player operation. Runs on the main loop.
 fn dispatch(player: &SharedPlayer, verb: &str, payload: &[u8]) {
     match verb {
-        "play.random" => player.play_random(),
+        // An undecodable payload still plays a random clip from the mode: the
+        // move is what was asked for, the corpus is the detail.
+        "play.random" => {
+            let corpus = decode::<RandomArg>(verb, payload).and_then(|a| a.corpus);
+            player.play_random(corpus.as_deref());
+        }
+        "playlist.mode" => {
+            if let Some(a) = decode::<ModeArg>(verb, payload) {
+                let corpora = crate::player::parse_corpora(&a.corpora);
+                if corpora.len() < a.corpora.len() {
+                    warn!(asked = ?a.corpora, kept = ?corpora, "playlist.mode: unknown corpus names dropped");
+                }
+                player.set_mode(corpora);
+            }
+        }
         "play.file" | "play.at" => {
             if let Some(p) = decode::<FileAt>(verb, payload) {
                 player.play_at(&p.file, p.position_ms);

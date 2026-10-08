@@ -33,6 +33,16 @@ pub(crate) struct Player {
     pub(crate) concat: gst::Element,
     /// Immutable playlist, sorted. Commands index into this.
     pub(crate) files: Vec<PathBuf>,
+    /// Corpus of each playlist entry, by index (see `corpus_of`).
+    pub(crate) corpora: Vec<&'static str>,
+    /// Corpora the ambient rotation draws from: cold boot, `play.random`
+    /// without a corpus, natural boundaries, skip/back. Never empty of
+    /// playlist entries — `set_mode` refuses a set that matches none.
+    pub(crate) mode: Mutex<Vec<&'static str>>,
+    /// The corpus a `play.random {corpus}` sneak dropped into from outside the
+    /// mode. Its clips ride on to the end of their block before the rotation
+    /// returns to the mode; any other command, or a mode change, ends the ride.
+    pub(crate) riding: Mutex<Option<&'static str>>,
     /// Live clip bins in play order: `[active, prerolled-next]`.
     pub(crate) clips: Mutex<Vec<Clip>>,
     /// Clip bins stop at parsed H.264 instead of decoding, and seeks snap to
@@ -50,15 +60,81 @@ pub(crate) struct Player {
 
 pub(crate) type SharedPlayer = Arc<Player>;
 
-/// Playlist index `n` clips forward of `active`, wrapping. n<1 is treated as 1.
-fn skip_index(active: usize, n: i32, len: usize) -> usize {
-    (active + (n.max(1) as usize)) % len
+/// The airing corpora. A clip's corpus is the top-level subdir of `VIDEO_DIR`
+/// it sits in: `s2/` and `s2fast/` name theirs, anything else is `s1`.
+pub(crate) const CORPORA: [&str; 3] = ["s1", "s2", "s2fast"];
+
+/// Corpus of a playlist entry, from its path relative to `VIDEO_DIR`.
+pub(crate) fn corpus_of(rel: &std::path::Path) -> &'static str {
+    let mut parts = rel.components();
+    let top = parts.next().and_then(|c| c.as_os_str().to_str());
+    // A file at the root is s1 whatever its name; only a directory names one.
+    if parts.next().is_none() {
+        return "s1";
+    }
+    match top {
+        Some("s2") => "s2",
+        Some("s2fast") => "s2fast",
+        _ => "s1",
+    }
 }
 
-/// Playlist index `n` clips back of `active`, wrapping. n<1 is treated as 1.
-fn back_index(active: usize, n: i32, len: usize) -> usize {
-    let n = (n.max(1) as usize) % len;
-    (active + len - n) % len
+/// The known corpus names in `names`, deduplicated, in canonical order.
+/// Unknown names are dropped (the caller warns).
+pub(crate) fn parse_corpora<S: AsRef<str>>(names: &[S]) -> Vec<&'static str> {
+    CORPORA
+        .into_iter()
+        .filter(|c| names.iter().any(|n| n.as_ref().trim() == *c))
+        .collect()
+}
+
+/// Playlist indices whose corpus is in `set`, ascending.
+fn indices_in(corpora: &[&str], set: &[&str]) -> Vec<usize> {
+    (0..corpora.len())
+        .filter(|&i| set.contains(&corpora[i]))
+        .collect()
+}
+
+/// Step `n` in-mode entries from `active` (`forward` or back), wrapping.
+/// `ids` are the in-mode indices, ascending and non-empty. An `active` outside
+/// the mode — a sneaked clip — steps from where it sits in the playlist, so a
+/// skip out of it lands on the nearest in-mode entry. n<1 is treated as 1.
+fn step_in_mode(active: usize, n: i32, forward: bool, ids: &[usize]) -> usize {
+    let m = ids.len();
+    let n = (n.max(1) as usize) % m;
+    let (pos, member) = match ids.binary_search(&active) {
+        Ok(k) => (k, true),
+        Err(p) => (p, false),
+    };
+    if forward {
+        // From outside the mode, the first step is ids[pos] itself.
+        let k = if member { pos + n } else { pos + n + m - 1 };
+        ids[k % m]
+    } else {
+        ids[(pos + m - n) % m]
+    }
+}
+
+/// The clip that follows `finished` at a natural boundary: the next in-mode
+/// entry, wrapping. While a sneak is `riding` the finished clip's corpus, the
+/// sneak rides its block instead — the next entry while it is the same
+/// corpus — and then comes home the same way. `in_mode` holds for at least
+/// one entry.
+fn next_index(
+    finished: usize,
+    corpora: &[&str],
+    riding: Option<&str>,
+    in_mode: impl Fn(usize) -> bool,
+) -> usize {
+    let len = corpora.len();
+    let after = finished + 1;
+    if riding == Some(corpora[finished]) && after < len && corpora[after] == corpora[finished] {
+        return after;
+    }
+    (1..=len)
+        .map(|k| (finished + k) % len)
+        .find(|&i| in_mode(i))
+        .unwrap_or(after % len)
 }
 
 /// Where a signed playhead move lands: walk the playlist from `pos_ms` into
@@ -203,11 +279,51 @@ impl Player {
     // ponytail: stdlib RNG via RandomState's seeded hasher — good enough to
     // pick a clip, no `rand` crate. Upgrade to `rand` only if distribution
     // quality ever matters here (it won't for "play a random dashcam clip").
-    pub(crate) fn random_index(&self) -> usize {
+    fn random_in(&self, ids: &[usize]) -> usize {
         let r = std::collections::hash_map::RandomState::new()
             .build_hasher()
             .finish();
-        (r % self.files.len() as u64) as usize
+        ids[(r % ids.len() as u64) as usize]
+    }
+
+    /// Playlist indices in the current mode, ascending. Never empty.
+    fn mode_ids(&self) -> Vec<usize> {
+        indices_in(&self.corpora, &self.mode.lock().unwrap())
+    }
+
+    /// A random clip from the current mode.
+    pub(crate) fn random_index(&self) -> usize {
+        self.random_in(&self.mode_ids())
+    }
+
+    pub(crate) fn next_after(&self, finished: usize) -> usize {
+        let mode = self.mode.lock().unwrap();
+        let riding = *self.riding.lock().unwrap();
+        next_index(finished, &self.corpora, riding, |i| {
+            mode.contains(&self.corpora[i])
+        })
+    }
+
+    /// Replace the ambient mode. A set matching no playlist entry is refused —
+    /// the rotation would have nothing to play. The prerolled clip was picked
+    /// under the old mode, so it is re-picked under the new one; the clip on
+    /// screen plays out.
+    pub(crate) fn set_mode(self: &Arc<Self>, corpora: Vec<&'static str>) {
+        if indices_in(&self.corpora, &corpora).is_empty() {
+            warn!(
+                ?corpora,
+                "playlist mode matches no clip; keeping the current mode"
+            );
+            return;
+        }
+        info!(?corpora, "playlist mode");
+        *self.mode.lock().unwrap() = corpora;
+        *self.riding.lock().unwrap() = None;
+        let active = self.clips.lock().unwrap().first().map(|c| c.index);
+        if let Some(active) = active {
+            self.teardown_preroll();
+            self.spawn(self.next_after(active), 0);
+        }
     }
 
     fn active_index(&self) -> usize {
@@ -427,7 +543,7 @@ impl Player {
             .lock()
             .unwrap()
             .first()
-            .map(|c| (c.index + 1) % self.files.len());
+            .map(|c| self.next_after(c.index));
         if let Some(next) = next {
             self.spawn(next, 0);
         }
@@ -483,7 +599,7 @@ impl Player {
             // active clip's successor — that would respawn the bad clip.
             failed.index
         };
-        self.spawn((next + 1) % self.files.len(), 0);
+        self.spawn(self.next_after(next), 0);
         true
     }
 
@@ -524,13 +640,40 @@ impl Player {
     /// prerolled clip, then finish the active clip so concat cuts straight to
     /// it through the same long-lived encoder.
     pub(crate) fn play_index(self: &Arc<Self>, index: usize, offset_ms: i64) {
+        self.play_riding(index, offset_ms, None);
+    }
+
+    /// play_index, recording the sneak (if any) the new clip starts.
+    fn play_riding(self: &Arc<Self>, index: usize, offset_ms: i64, riding: Option<&'static str>) {
+        *self.riding.lock().unwrap() = riding;
         self.teardown_preroll();
         self.spawn(index, offset_ms);
         self.jump();
     }
 
-    pub(crate) fn play_random(self: &Arc<Self>) {
-        self.play_index(self.random_index(), 0);
+    /// A random clip: from `corpus` when named (the way into a block outside
+    /// the mode — it rides to the block's end, then returns), else from the
+    /// mode. A corpus with no clips falls back to the mode.
+    pub(crate) fn play_random(self: &Arc<Self>, corpus: Option<&str>) {
+        let named = corpus.and_then(|c| {
+            let set = parse_corpora(&[c]);
+            if indices_in(&self.corpora, &set).is_empty() {
+                warn!(
+                    corpus = c,
+                    "play.random: no clips in that corpus; using the mode"
+                );
+                return None;
+            }
+            set.first().copied()
+        });
+        let Some(c) = named else {
+            self.play_index(self.random_index(), 0);
+            return;
+        };
+        let index = self.random_in(&indices_in(&self.corpora, &[c]));
+        // A corpus already in the mode is the ordinary rotation, not a sneak.
+        let sneak = (!self.mode.lock().unwrap().contains(&c)).then_some(c);
+        self.play_riding(index, 0, sneak);
     }
 
     /// play.file and play.at: the clip named `name`, from `position_ms` in
@@ -542,13 +685,15 @@ impl Player {
         }
     }
 
+    /// skip/back count clips in the mode, so a skip can't walk the rotation
+    /// into a corpus it excludes.
     pub(crate) fn skip(self: &Arc<Self>, n: i32) {
-        let i = skip_index(self.active_index(), n, self.files.len());
+        let i = step_in_mode(self.active_index(), n, true, &self.mode_ids());
         self.play_index(i, 0);
     }
 
     pub(crate) fn back(self: &Arc<Self>, n: i32) {
-        let i = back_index(self.active_index(), n, self.files.len());
+        let i = step_in_mode(self.active_index(), n, false, &self.mode_ids());
         self.play_index(i, 0);
     }
 
@@ -623,15 +768,110 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
-    use super::{back_index, should_seek_to, skip_index};
+    use super::{corpus_of, indices_in, next_index, parse_corpora, should_seek_to, step_in_mode};
+    use std::path::Path;
 
     #[test]
     fn skip_wraps_and_floors_to_one() {
-        assert_eq!(skip_index(0, 1, 5), 1);
-        assert_eq!(skip_index(3, 3, 5), 1); // 3+3=6 % 5
-        assert_eq!(skip_index(4, 1, 5), 0); // wrap
-        assert_eq!(skip_index(2, 0, 5), 3); // n<1 treated as 1
-        assert_eq!(skip_index(2, -4, 5), 3);
+        let all = [0, 1, 2, 3, 4];
+        let skip = |a, n| step_in_mode(a, n, true, &all);
+        assert_eq!(skip(0, 1), 1);
+        assert_eq!(skip(3, 3), 1); // 3+3=6 % 5
+        assert_eq!(skip(4, 1), 0); // wrap
+        assert_eq!(skip(2, 0), 3); // n<1 treated as 1
+        assert_eq!(skip(2, -4), 3);
+        assert_eq!(skip(2, 5), 2); // a whole lap
+    }
+
+    #[test]
+    fn back_wraps_and_floors_to_one() {
+        let all = [0, 1, 2, 3, 4];
+        let back = |a, n| step_in_mode(a, n, false, &all);
+        assert_eq!(back(1, 1), 0);
+        assert_eq!(back(0, 1), 4); // wrap
+        assert_eq!(back(2, 3), 4); // 2-3 mod 5
+        assert_eq!(back(3, 0), 2); // n<1 treated as 1
+    }
+
+    #[test]
+    fn skip_and_back_count_only_in_mode_clips() {
+        // Playlist s1 s1 s1 s2 s2 s2fast, mode {s1}: ids 0..=2.
+        let ids = [0, 1, 2];
+        assert_eq!(step_in_mode(2, 1, true, &ids), 0); // never into the s2 tail
+        assert_eq!(step_in_mode(0, 1, false, &ids), 2);
+        // From a sneaked s2 clip at 4: forward 1 is the next in-mode entry
+        // (wrapping to 0), back 1 the previous one.
+        assert_eq!(step_in_mode(4, 1, true, &ids), 0);
+        assert_eq!(step_in_mode(4, 2, true, &ids), 1);
+        assert_eq!(step_in_mode(4, 1, false, &ids), 2);
+        assert_eq!(step_in_mode(4, 3, false, &ids), 0);
+        // Mode {s2}: ids 3, 4; from s1 clip 1 forward 1 lands on 3.
+        assert_eq!(step_in_mode(1, 1, true, &[3, 4]), 3);
+        assert_eq!(step_in_mode(1, 1, false, &[3, 4]), 4);
+        // Chat-sized n never indexes out of range.
+        assert_eq!(
+            step_in_mode(0, i32::MAX, true, &ids),
+            ids[(i32::MAX as usize) % 3]
+        );
+    }
+
+    #[test]
+    fn corpus_is_the_top_level_subdir() {
+        assert_eq!(corpus_of(Path::new("2018_0512_202531_002.MP4")), "s1");
+        assert_eq!(
+            corpus_of(Path::new("s2/20260205101500_000001_s0000.MP4")),
+            "s2"
+        );
+        assert_eq!(corpus_of(Path::new("s2fast/a.MP4")), "s2fast");
+        assert_eq!(corpus_of(Path::new("s2/nested/deeper.mp4")), "s2");
+        assert_eq!(corpus_of(Path::new("other/a.mp4")), "s1");
+        assert_eq!(corpus_of(Path::new("s1/a.mp4")), "s1");
+        // A file named like a corpus is still a root-level s1 clip.
+        assert_eq!(corpus_of(Path::new("s2")), "s1");
+    }
+
+    #[test]
+    fn parse_corpora_keeps_known_names_in_order() {
+        assert_eq!(parse_corpora(&["s2", "s1", "s2"]), ["s1", "s2"]);
+        assert_eq!(parse_corpora(&[" s2fast ", "s3", ""]), ["s2fast"]);
+        assert!(parse_corpora::<&str>(&[]).is_empty());
+    }
+
+    #[test]
+    fn boundaries_stay_in_mode_and_ride_a_sneaked_block_home() {
+        //            0     1     2     3     4     5         6
+        let corpora = ["s1", "s1", "s1", "s2", "s2", "s2fast", "s2fast"];
+        let next = |finished, mode: &[&str]| {
+            next_index(finished, &corpora, None, |i| mode.contains(&corpora[i]))
+        };
+        let ride = |finished, mode: &[&str], riding| {
+            next_index(finished, &corpora, Some(riding), |i| {
+                mode.contains(&corpora[i])
+            })
+        };
+        // {s1}: the s1 run wraps on itself, never into the s2 tail.
+        assert_eq!(next(1, &["s1"]), 2);
+        assert_eq!(next(2, &["s1"]), 0);
+        // A sneaked s2 clip rides its block to the end, then comes home.
+        assert_eq!(ride(3, &["s1"], "s2"), 4);
+        assert_eq!(ride(4, &["s1"], "s2"), 0);
+        // An out-of-mode clip nobody sneaked into (an explicit play.file)
+        // hands straight back to the mode.
+        assert_eq!(next(3, &["s1"]), 0);
+        // {s1,s2}: s1 runs into s2, and the last s2 wraps home past s2fast.
+        assert_eq!(next(2, &["s1", "s2"]), 3);
+        assert_eq!(next(4, &["s1", "s2"]), 0);
+        // A fast block {s2fast} loops on itself; a sneak into it from {s1}
+        // rides to its end, then wraps home.
+        assert_eq!(next(6, &["s2fast"]), 5);
+        assert_eq!(ride(5, &["s1"], "s2fast"), 6);
+        assert_eq!(ride(6, &["s1"], "s2fast"), 0);
+        // An s1 clip on screen when the mode flips to {s2fast} hands straight
+        // on, rather than riding the whole s1 corpus first.
+        assert_eq!(next(0, &["s2fast"]), 5);
+        // {s2} alone loops its block.
+        assert_eq!(next(4, &["s2"]), 3);
+        assert_eq!(indices_in(&corpora, &["s2"]), [3, 4]);
     }
 
     #[test]
@@ -734,14 +974,6 @@ mod tests {
         let (i, off) = seek_walk(0, 0, 10 * 365 * 24 * 3_600_000, 4406, durs);
         assert!(i < 4406 && (0..180_000).contains(&off));
         assert_eq!(probed.get(), 30);
-    }
-
-    #[test]
-    fn back_wraps_and_floors_to_one() {
-        assert_eq!(back_index(1, 1, 5), 0);
-        assert_eq!(back_index(0, 1, 5), 4); // wrap
-        assert_eq!(back_index(2, 3, 5), 4); // 2-3 mod 5
-        assert_eq!(back_index(3, 0, 5), 2); // n<1 treated as 1
     }
 
     /// `delta_ms` is chat input: `!skip 1h30m` in Twitch chat becomes a signed

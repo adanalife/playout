@@ -181,6 +181,28 @@ fn all_bad_corpus() -> &'static Path {
     })
 }
 
+/// A corpus spanning all three corpora: `corpus()`'s clips at the root (s1),
+/// two under `s2/`, one under `s2fast/`. Copies, not fresh encodes — playout
+/// tells the corpora apart by directory alone.
+fn three_corpora() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("playout-parity-corpora-{}", std::process::id()));
+        for sub in ["s2", "s2fast"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let src = corpus();
+        for name in CLIPS {
+            std::fs::copy(src.join(name), dir.join(name)).unwrap();
+        }
+        std::fs::copy(src.join(CLIPS[0]), dir.join("s2/s2_a.mp4")).unwrap();
+        std::fs::copy(src.join(CLIPS[1]), dir.join("s2/s2_b.mp4")).unwrap();
+        std::fs::copy(src.join(CLIPS[2]), dir.join("s2fast/s2fast_a.mp4")).unwrap();
+        dir
+    })
+}
+
 /// Long-clip corpus (20s, small frames for cheap encode) for tests that
 /// assert "current did NOT change" — with 2s clips a natural boundary lands
 /// mid-assertion and reads as a leaked command.
@@ -626,6 +648,57 @@ async fn boundaries_advance_and_wrap() {
     wait_ready(p.http);
 
     wait_all_clips_seen(p.http, "all clips to play through boundaries");
+}
+
+/// The ambient rotation stays inside the mode (`{s1}` by default), a
+/// `play.random {corpus}` sneak rides its block and comes home, and
+/// `playlist.mode` moves the rotation — skip included — into another corpus.
+#[tokio::test]
+async fn corpora_partition_the_rotation() {
+    serial_or_skip!();
+    let (_nats, nport) = start_nats();
+    let (_mtx, mport) = start_mediamtx();
+    let p = start_playout(three_corpora(), Some(nport), mport, "youtube");
+    wait_ready(p.http);
+
+    // Boot mode {s1}: every s1 clip plays through boundaries, nothing else.
+    let mut seen = std::collections::HashSet::new();
+    wait_for(
+        "every s1 clip, and only s1",
+        Duration::from_secs(6 * CLIP_SECONDS * CLIPS.len() as u64),
+        || {
+            let c = current(p.http);
+            assert!(!c.starts_with("s2"), "ambient {{s1}} rotation played {c}");
+            if !c.is_empty() {
+                seen.insert(c);
+            }
+            (seen.len() == CLIPS.len()).then_some(())
+        },
+    );
+
+    // A sneak into s2 rides the block, then returns to s1 — never s2fast.
+    publish_command(nport, "youtube", "play.random", r#"{"corpus":"s2"}"#).await;
+    wait_current(p.http, "the s2 sneak", |c| c.starts_with("s2_"));
+    wait_current(p.http, "the ride home", |c| {
+        assert!(!c.starts_with("s2fast"), "the s2 ride ran into s2fast");
+        CLIPS.contains(&c)
+    });
+
+    // A set naming no clip is refused; the rotation carries on in {s1}.
+    publish_command(nport, "youtube", "playlist.mode", r#"{"corpora":["s9"]}"#).await;
+
+    // {s2fast}: the next boundary lands in it and the block loops on itself.
+    publish_command(
+        nport,
+        "youtube",
+        "playlist.mode",
+        r#"{"corpora":["s2fast"]}"#,
+    )
+    .await;
+    wait_current(p.http, "the fast block", |c| c == "s2fast_a.mp4");
+    publish_command(nport, "youtube", "skip", r#"{"n":1}"#).await;
+    std::thread::sleep(Duration::from_secs(3 * CLIP_SECONDS));
+    assert_eq!(current(p.http), "s2fast_a.mp4", "left the {{s2fast}} block");
 }
 
 /// The console's chat-map mode: the MediaMTX relay is parked (its Deployment
