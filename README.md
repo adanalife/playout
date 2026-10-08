@@ -45,8 +45,16 @@ off-cluster viewers get TCP transport.
 
 - **NATS commands** on `tripbot.<env>.playout.<verb>.<platform>`
   (fire-and-forget): `play.random`, `play.file`, `play.at`, `skip`, `back`,
-  `seek`. The platform leaf keeps instances isolated — a Twitch-triggered skip
+  `seek`, `playlist.mode`. The platform leaf keeps instances isolated — a Twitch-triggered skip
   can't advance the YouTube stream. tripbot's `playout-client` is the publisher.
+- **Corpora**: each clip belongs to the corpus named by its top-level subdir
+  of `VIDEO_DIR` — `s2/`, `s2fast/`, anything else `s1`. The ambient rotation
+  (cold boot, natural boundaries, `play.random`, `skip`/`back`) draws only from
+  the **mode**, a set of corpora: `CORPORA` (comma-separated, default `s1`) at
+  boot, replaced live by `playlist.mode` (`{"corpora": ["s1", "s2"]}`).
+  `play.random {"corpus": "s2"}` sneaks into a corpus outside the mode, rides
+  that block to its end, then returns to the mode. `play.file`/`play.at` reach
+  any clip.
 - **Resume**: the active clip + position are republished every 5s to the
   `TRIPBOT_PLAYOUT_LASTPLAYED` JetStream last-value cache, which a restarting
   instance reads to pick up where it left off. NATS being down degrades to
