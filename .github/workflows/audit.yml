@@ -16,10 +16,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# checks: write lets audit-check publish its findings as a check run with the
-# advisories annotated. Without it the create-check API 403s, the action guesses
-# it must be running on a fork, and falls back to printing the report into the
-# job log — where the reason the job failed is thirty lines below the failure.
 permissions:
   contents: read
   issues: write
@@ -27,11 +23,4 @@ permissions:
 
 jobs:
   audit:
-    name: cargo audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+    uses: adanalife/infra/.github/workflows/cargo-audit.yml@main
