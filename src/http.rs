@@ -1,8 +1,70 @@
 use crate::SharedPlayer;
-use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Router,
+    extract::{Path, Query, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use gst::prelude::*;
 use gstreamer as gst;
+use serde::Deserialize;
 use std::net::SocketAddr;
+use tracing::warn;
+
+#[derive(Deserialize)]
+struct FrameQuery {
+    /// Seconds into the clip; the top of it when absent.
+    #[serde(default)]
+    at: f64,
+}
+
+/// Grabs decode on the blocking pool beside the live encoder, so two at once
+/// is the ceiling: the console's clip page is one operator's click, and a
+/// burst past that waits rather than starving the stream of CPU.
+// ponytail: a fixed cap of 2; make it a setting if a second consumer appears.
+static GRABS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// One frame of a playlist clip as a JPEG, for the console's clip page. The
+/// clip is named by basename, the way `play.at` names it, and resolved
+/// against the playlist — so there is no path to traverse and an unknown
+/// name is a 404. The corpus is immutable, so the picture may be cached for
+/// a week.
+async fn frame(
+    State(player): State<SharedPlayer>,
+    Path(name): Path<String>,
+    Query(q): Query<FrameQuery>,
+) -> Response {
+    let Some(index) = player.find(&name) else {
+        return (StatusCode::NOT_FOUND, "no such clip").into_response();
+    };
+    let path = player.files[index].clone();
+    let at_ms = (q.at.max(0.0) * 1000.0) as u64;
+    let _slot = GRABS.acquire().await.expect("semaphore never closes");
+    let grab = tokio::task::spawn_blocking(move || crate::frame::grab(&path, at_ms));
+    match tokio::time::timeout(crate::frame::BUDGET, grab).await {
+        Ok(Ok(Ok(jpeg))) => (
+            [
+                (header::CONTENT_TYPE, "image/jpeg"),
+                (header::CACHE_CONTROL, "public, max-age=604800"),
+            ],
+            jpeg,
+        )
+            .into_response(),
+        Ok(Ok(Err(err))) => {
+            warn!(clip = %name, at_ms, err = %format!("{err:#}"), "frame grab failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "frame grab failed").into_response()
+        }
+        Ok(Err(join)) => {
+            warn!(clip = %name, at_ms, err = %join, "frame grab panicked");
+            (StatusCode::INTERNAL_SERVER_ERROR, "frame grab failed").into_response()
+        }
+        Err(_) => {
+            warn!(clip = %name, at_ms, "frame grab timed out");
+            (StatusCode::GATEWAY_TIMEOUT, "frame grab timed out").into_response()
+        }
+    }
+}
 
 /// Process-is-alive signal: if this handler runs at all, the answer is yes.
 /// Deeper checks belong on /health/ready — a stuck pipeline should fail
@@ -75,6 +137,7 @@ pub async fn run(player: SharedPlayer) {
         .route("/version", get(version))
         .route("/playout/current", get(current))
         .route("/debug/pipeline", get(pipeline_dot))
+        .route("/frame/{name}", get(frame))
         .with_state(player);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
