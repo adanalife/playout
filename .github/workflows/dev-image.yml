@@ -2,6 +2,8 @@ name: dev-image
 # Floating :main image on every main push — what stage-1 deploys
 # (imagePullPolicy: Always picks up rebuilds under the tag). amd64 only,
 # same rationale as release.yml.
+# A failed build alerts Discord through the shared workflow's alert job, so
+# :main freezing on the previous commit does not go unnoticed.
 on:
   push:
     branches:
@@ -25,3 +27,5 @@ jobs:
     with:
       image: playout
       build-args: SHA=${{ github.sha }}
+    secrets:
+      DISCORD_WEBHOOK_ALERTS: ${{ secrets.DISCORD_WEBHOOK_ALERTS }}
