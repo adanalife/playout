@@ -1,138 +1,29 @@
 name: release-please
-# Trunk-based release flow: release-please maintains a standing release PR on
-# main — the next version + prod pin, computed from the conventional commits
-# since the last release. `skip-changelog` is set because this repo keeps
-# towncrier: the "Build changelog" step below collates the changelog.d/
-# fragments into CHANGELOG.md on the release PR branch, so the built changelog
-# lands atomically with the version bump when the PR squash-merges. (The prod
-# dist needs no re-synth here — release-please rewrites cdk8s/versions.yaml and
-# the committed dist directly via extra-files.)
+# Trunk-based release flow, run by infra's shared release-please workflow: a
+# standing release PR on main (the next version + prod pin), with the towncrier
+# changelog built onto its branch. The prod dist needs no re-synth here —
+# release-please rewrites cdk8s/versions.yaml and the committed dist directly
+# via extra-files. Merging the release PR creates the vX.Y.Z tag + GitHub
+# Release, and the tag fires release.yml on its own.
 #
-# Merging the release PR creates the vX.Y.Z tag + GitHub Release, and the tag
-# fires release.yml on its own.
-#
-# It runs on the adanalife-automation app token, not GITHUB_TOKEN, and both
-# halves of that matter. Anything github-actions[bot] triggers is held at
-# `action_required` under the repo's first-time-contributor approval policy —
-# a status the bot never outgrows — so a bot-authored release PR parks its
-# gates unrun until someone clicks approve. And a GITHUB_TOKEN-pushed tag
-# fires no push trigger at all, so release.yml would need dispatching by hand.
-# An app token is an ordinary actor on both counts: its pull_request events run
-# unheld and its tag reaches release.yml on its own.
-#
-# The manual trigger is the escape hatch for a stale release branch: release-please
-# only rebuilds the PR when a *releasable* commit lands, so a run of chore-only
-# merges leaves the branch on an old base — and any repo-state check that runs on
-# the release PR (the contract-sync gate) keeps failing against content main has
-# already fixed. Dispatching rebases it off current main.
+# workflow_dispatch is the escape hatch for a stale release branch:
+# release-please only rebuilds the PR when a *releasable* commit lands, so a
+# run of chore-only merges leaves the branch on an old base. Dispatching
+# rebases it off current main.
 on:
   push:
     branches:
       - main
   workflow_dispatch:
 
-# Every write goes through the app token below; the job's own GITHUB_TOKEN
-# needs nothing.
 permissions:
   contents: read
 
-concurrency:
-  group: release-please
-  cancel-in-progress: false
-
 jobs:
   release-please:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Mint automation app token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ vars.AUTOMATION_APP_ID }}
-          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
-          # Without these the token carries the app installation's whole
-          # permission set. release-please needs exactly two: contents to push
-          # the branch and cut the tag, pull-requests to maintain the release PR.
-          permission-contents: write
-          permission-pull-requests: write
-
-      - uses: googleapis/release-please-action@v5
-        id: release
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-
-      # While a release PR is open (not on the release-created run), stage the
-      # towncrier changelog onto its branch. Pushed with the automation app
-      # token so the push fires the PR's pull_request events (CI gates re-run
-      # against the final release state); a GITHUB_TOKEN push wouldn't, and the
-      # required checks would then hang as "Expected". release-please recreates
-      # this branch from main on every push, so this rebuild is idempotent.
-      #
-      # Keyed off the branch existing, not `steps.release.outputs.pr`: that output
-      # is set only on runs where release-please itself changed the PR, and a push
-      # that leaves it empty skips the staging pass — so the PR merges with an
-      # unbuilt changelog and, because the app-token push is what fires its
-      # pull_request events, no CI at all (platform-gateway 1.27.1). curl rather
-      # than `gh`: the ARC runner image ships no gh CLI.
-      #
-      # The branch carries a `--components--playout` suffix: the rust release
-      # type names the component after the crate, and `include-component-in-tag:
-      # false` keeps it out of the tag only, not the branch name.
-      - name: Check for an open release PR branch
-        if: ${{ !steps.release.outputs.release_created }}
-        id: release-branch
-        run: |
-          code=$(curl -sS -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/release-please--branches--main--components--playout")
-          echo "Release branch lookup: HTTP $code"
-          echo "exists=$([ "$code" = 200 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check out the release PR branch
-        if: ${{ steps.release-branch.outputs.exists == 'true' }}
-        uses: actions/checkout@v7
-        with:
-          ref: release-please--branches--main--components--playout
-          fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
-
-      - uses: astral-sh/setup-uv@v10.0.1 # no floating major tag published
-        if: ${{ steps.release-branch.outputs.exists == 'true' }}
-
-      - name: Build changelog on the release PR branch
-        if: ${{ steps.release-branch.outputs.exists == 'true' }}
-        run: |
-          set -euo pipefail
-          # release-please bumped Cargo.toml on this branch — the version is
-          # the single source of truth for both the changelog and the cut tag.
-          VERSION=$(grep -m1 -oE '^version = "[^"]+"' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-          echo "Release version: $VERSION"
-
-          # Fragments reach main as "+" placeholders; name each after the PR
-          # that added it, from its squash commit, before towncrier reads them.
-          # The scripts come from main: this checkout is the release branch,
-          # which release-please doesn't rebase just because main moved, so it
-          # can predate them.
-          git checkout origin/main -- scripts/number-fragment.sh scripts/number-fragments.sh
-          scripts/number-fragments.sh
-
-          # Collate the towncrier fragments (if any) into CHANGELOG.md + delete
-          # them. A release PR can exist with no fragments (a fix: whose entry
-          # was skip-changelog'd) — that's not an error, just no changelog
-          # stanza. The commit is allowed to be empty because the push itself is
-          # load-bearing: it's what fires the PR's CI checks.
-          if compgen -G "changelog.d/*.md" > /dev/null; then
-            uvx towncrier build --yes --config towncrier.toml --version "$VERSION"
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit --allow-empty -m "chore: build changelog for $VERSION"
-          git push origin HEAD:release-please--branches--main--components--playout
+    uses: adanalife/infra/.github/workflows/release-please.yml@main
+    with:
+      runs-on: ubuntu-latest
+      # The rust release type names the release branch after the crate.
+      branch: release-please--branches--main--components--playout
+    secrets: inherit

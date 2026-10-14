@@ -1,109 +1,33 @@
+# Tag-triggered release of the playout image, via the shared release-image
+# workflow (adanalife/infra). Public package — this repo is public, so cluster
+# pulls need no imagePullSecret.
 name: release
-# Tag-triggered image build pushed to GHCR (public package — this repo is
-# public, so cluster pulls need no imagePullSecret). amd64 only: the minipc
-# is amd64 and nothing schedules playout onto the Pi 5.
 on:
   push:
     tags:
       - v*
-  # A manual re-deploy of an existing tag, for when the push-triggered run
-  # failed on something outside the code (a registry hiccup, an expired
-  # token). Pick the tag as the ref.
+  # Rebuild an existing tag. `tag` builds it with this revision's workflow
+  # (`gh workflow run release.yml --ref main -f tag=vX.Y.Z`); dispatching at the
+  # tag itself runs the workflow file as it was when the tag was cut, so a tag
+  # whose release failed on a since-fixed workflow bug can't be rebuilt that way.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (default: the dispatched ref)"
+        required: false
+        type: string
 
 permissions:
   contents: read
   packages: write
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Login to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate tags
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/adanalife/playout
-          flavor: latest=true
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern=v{{major}}.{{minor}}
-            type=semver,pattern=v{{major}}
-
-      - name: Build & push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64
-          tags: ${{ steps.meta.outputs.tags }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
-            SHA=${{ github.sha }}
-          push: true
-          cache-from: type=gha,scope=playout
-          cache-to: type=gha,mode=max,scope=playout
-
-  notify:
-    needs: [build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      # Only the tag push announces. A workflow_dispatch run re-deploys a tag
-      # that already shipped, which is operational rather than news. The alert
-      # below stays unconditional: a re-deploy going red is exactly the case
-      # worth paging on.
-      - name: Discord notification
-        if: github.event_name == 'push'
-        # A rotated or deleted webhook returns 404 and must not fail a release
-        # that already shipped; the notification is best-effort.
-        continue-on-error: true
-        uses: Ilshidur/action-discord@0.4.0
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          VERSION_TAG: ${{ github.ref_name }}
-        with:
-          # Link the tagged CHANGELOG.md, not a payload `compare` URL: one wording
-          # fleet-wide, so a release reads the same whichever repo it came from.
-          args: 'New release for [{{ EVENT_PAYLOAD.repository.full_name }}]({{ EVENT_PAYLOAD.repository.html_url }}): [{{ VERSION_TAG }}]({{ EVENT_PAYLOAD.repository.html_url }}/blob/{{ VERSION_TAG }}/CHANGELOG.md)'
-
-  # Nothing else says a release went red. The release PR merged green long
-  # before the tag ran, so the only record is this run's own entry in a run
-  # list nobody is watching.
-  #
-  # `if: failure()` is what makes this the catch-all: it runs when any job
-  # above failed, including when a later one was skipped as a result. `notify`
-  # cannot trip it, since continue-on-error keeps a dead webhook out of that
-  # job's status.
-  #
-  # Best-effort like the announcement -- a failure to report a failure should
-  # not become a second failure.
-  alert:
-    needs: [build, notify]
-    if: failure()
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Alert Discord on failure
-        continue-on-error: true
-        uses: Ilshidur/action-discord@0.4.0
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_ALERTS }}
-          VERSION_TAG: ${{ github.ref_name }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        with:
-          # Points at the log rather than naming what failed: any job above can
-          # be the one, and naming it would go stale as the jobs change.
-          args: 'Release failed for [{{ EVENT_PAYLOAD.repository.full_name }}]({{ EVENT_PAYLOAD.repository.html_url }}) at {{ VERSION_TAG }}: [run log]({{ RUN_URL }})'
+  release:
+    uses: adanalife/infra/.github/workflows/release-image.yml@main
+    with:
+      image: playout
+      tag: ${{ inputs.tag }}
+      build-args: SHA=${{ github.sha }}
+    secrets:
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+      DISCORD_WEBHOOK_ALERTS: ${{ secrets.DISCORD_WEBHOOK_ALERTS }}
