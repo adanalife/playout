@@ -2,6 +2,17 @@
 
 <!-- towncrier release notes start -->
 
+## [v1.2.0] — 2026-10-15
+
+### Added
+
+- `GET /frame/{basename}?at=` answers one frame of a playlist clip as a JPEG, for the console's clip page. ([#206](https://github.com/adanalife/playout/pull/206))
+
+### CI / Tooling
+
+- CI workflows call the org's shared reusable workflows (adanalife/infra) instead of each carrying its own copy. ([#200](https://github.com/adanalife/playout/pull/200))
+- The per-PR gates run with a read-only token instead of the repository's default one, and the weekly lint sweep keeps ruff's pre-0.16 rule set. ([#204](https://github.com/adanalife/playout/pull/204))
+
 ## [v1.1.0] — 2026-10-08
 
 ### Added
