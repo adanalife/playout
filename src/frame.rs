@@ -33,11 +33,14 @@ pub(crate) fn grab(path: &Path, at_ms: u64) -> Result<Vec<u8>> {
         .build()
         .context("playbin")?;
     // Video only: the audio track is never decoded, and nothing is rendered —
-    // the sink bin ends in an appsink the frame is pulled from.
+    // the sink bin ends in an appsink the frame is pulled from. Square pixels
+    // are pinned so videoscale derives the height from the width; with width
+    // alone it keeps the source height and records the squeeze in the
+    // pixel-aspect-ratio, which a JPEG viewer ignores.
     playbin.set_property_from_str("flags", "video");
     let sink = gst::parse::bin_from_description(
         &format!(
-            "videoconvert ! videoscale ! video/x-raw,width={WIDTH} ! jpegenc ! appsink name=sink sync=false"
+            "videoconvert ! videoscale ! video/x-raw,width={WIDTH},pixel-aspect-ratio=1/1 ! jpegenc ! appsink name=sink sync=false"
         ),
         true,
     )
@@ -113,6 +116,16 @@ mod tests {
         Some(path)
     }
 
+    /// (width, height) from the JPEG's baseline start-of-frame (SOF0) header.
+    fn dimensions(jpeg: &[u8]) -> (u32, u32) {
+        let at = jpeg
+            .windows(2)
+            .position(|w| w == [0xFF, 0xC0])
+            .expect("no SOF0 marker");
+        let be = |i: usize| u32::from(jpeg[at + i]) << 8 | u32::from(jpeg[at + i + 1]);
+        (be(7), be(5))
+    }
+
     #[test]
     fn grabs_a_jpeg_at_the_top_and_mid_clip() {
         let dir = std::env::temp_dir().join(format!("playout-frame-{}", std::process::id()));
@@ -125,6 +138,7 @@ mod tests {
             // JPEG SOI marker, and a real picture rather than a header.
             assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "at {at_ms} ms");
             assert!(jpeg.len() > 1000, "at {at_ms} ms: {} bytes", jpeg.len());
+            assert_eq!(dimensions(&jpeg), (WIDTH, WIDTH * 9 / 16), "at {at_ms} ms");
         }
         // Past the end: the seek clamps to the last keyframe rather than failing.
         assert!(grab(&clip, 60_000).is_ok());
