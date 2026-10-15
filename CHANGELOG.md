@@ -2,6 +2,16 @@
 
 <!-- towncrier release notes start -->
 
+## [v1.3.0] — 2026-10-15
+
+### Added
+
+- `GET /clip/{name}` serves a playlist clip with HTTP range requests, for the console's clip page to play. ([#210](https://github.com/adanalife/playout/pull/210))
+
+### Fixed
+
+- The clip-page still keeps the clip's 16:9 shape instead of coming out 640×1080. ([#209](https://github.com/adanalife/playout/pull/209))
+
 ## [v1.2.0] — 2026-10-15
 
 ### Added
