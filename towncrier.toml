@@ -7,7 +7,7 @@
 # from the squash commit that added it, so each entry links to its PR. Run via
 # uvx — no project dependency:
 #
-#   task changelog:add TYPE=fix    # writes changelog.d/+<branch>-<hex>.fix.md
+#   task changelog:add TYPE=fix MSG="…"  # writes changelog.d/+<branch>-<hex>.fix.md
 #   task changelog:preview                                     # pending notes
 #   task changelog:build VERSION=1.2.0                         # collate
 #
