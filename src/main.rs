@@ -11,6 +11,7 @@ use gstreamer as gst;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 
+mod frame;
 mod http;
 mod nats;
 mod player;
