@@ -1,7 +1,7 @@
 use crate::SharedPlayer;
 use axum::{
     Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
@@ -10,6 +10,8 @@ use gst::prelude::*;
 use gstreamer as gst;
 use serde::Deserialize;
 use std::net::SocketAddr;
+use tower::ServiceExt;
+use tower_http::services::ServeFile;
 use tracing::warn;
 
 #[derive(Deserialize)]
@@ -64,6 +66,35 @@ async fn frame(
             (StatusCode::GATEWAY_TIMEOUT, "frame grab timed out").into_response()
         }
     }
+}
+
+/// A playlist clip's bytes, for the console's clip page to play. Named and
+/// resolved like `/frame`, so an unknown name is a 404 and there is no path to
+/// traverse. Range requests are honoured, so a browser seeking to the moment
+/// the page names reads only the bytes it plays — no decode, no encode, just
+/// the file off the mount.
+async fn clip(
+    State(player): State<SharedPlayer>,
+    Path(name): Path<String>,
+    req: Request,
+) -> Response {
+    let Some(index) = player.find(&name) else {
+        return (StatusCode::NOT_FOUND, "no such clip").into_response();
+    };
+    let path = player.files[index].clone();
+    clip_response(&path, req).await
+}
+
+async fn clip_response(path: &std::path::Path, req: Request) -> Response {
+    // The extension is upper-case on most of the corpus, so the type is named
+    // rather than guessed.
+    let file = ServeFile::new_with_mime(path, &"video/mp4".parse().expect("valid mime"));
+    let mut resp = file.oneshot(req).await.into_response();
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("public, max-age=604800"),
+    );
+    resp
 }
 
 /// Process-is-alive signal: if this handler runs at all, the answer is yes.
@@ -138,6 +169,7 @@ pub async fn run(player: SharedPlayer) {
         .route("/playout/current", get(current))
         .route("/debug/pipeline", get(pipeline_dot))
         .route("/frame/{name}", get(frame))
+        .route("/clip/{name}", get(clip))
         .with_state(player);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -159,6 +191,26 @@ mod tests {
             let (status, _) = ready_response(state);
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         }
+    }
+
+    #[tokio::test]
+    async fn clip_honours_a_range_request() {
+        let dir = std::env::temp_dir().join(format!("playout-clip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.MP4");
+        std::fs::write(&path, b"0123456789").unwrap();
+
+        let req = Request::builder()
+            .header(header::RANGE, "bytes=2-5")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = clip_response(&path, req).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "video/mp4");
+        assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
+        let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
+        assert_eq!(&body[..], b"2345");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
