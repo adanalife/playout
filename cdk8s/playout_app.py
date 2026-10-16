@@ -34,6 +34,11 @@ CRANE_IMAGE = "gcr.io/go-containerregistry/crane:v0.21.7"
 
 # Must match the path baked into the corpus PVs.
 DASHCAM_MOUNT = "/opt/data/Dashcam/_all"
+# Where the parked claim (the pipeline's `_opt` export) mounts, and the clip
+# directories under it the console may preview from: one per season-2 corpus,
+# as the pipeline renders them (`<corpus>/clips/`).
+PARKED_MOUNT = "/opt/data/parked"
+PARKED_CORPORA = ("s2", "s2fast")
 
 # SM container holding playout's Sentry DSN, JSON shape {"SENTRY_DSN": "…"}.
 # Created on the infra side. One Sentry project per component; envs are
@@ -194,6 +199,15 @@ class PlayoutInstance(Construct):
         # --- ConfigMap ---
         data = {
             "VIDEO_DIR": DASHCAM_MOUNT,
+            **(
+                {
+                    "PARKED_DIRS": ",".join(
+                        f"{PARKED_MOUNT}/{c}/clips" for c in PARKED_CORPORA
+                    )
+                }
+                if env.parked_claim
+                else {}
+            ),
             "OUTPUT": "rtsp",
             "ENCODER": env.encoder,
             # Publish into the per-platform MediaMTX relay (same namespace);
@@ -285,7 +299,12 @@ class PlayoutInstance(Construct):
                     "name": "dashcam",
                     "mountPath": DASHCAM_MOUNT,
                     "readOnly": True,
-                }
+                },
+                *(
+                    [{"name": "parked", "mountPath": PARKED_MOUNT, "readOnly": True}]
+                    if env.parked_claim
+                    else []
+                ),
             ],
             "resources": {"requests": requests, "limits": limits},
             "ports": [{"name": "http", "containerPort": HTTP_PORT}],
@@ -320,7 +339,20 @@ class PlayoutInstance(Construct):
                         "claimName": env.dashcam_claim,
                         "readOnly": True,
                     },
-                }
+                },
+                *(
+                    [
+                        {
+                            "name": "parked",
+                            "persistentVolumeClaim": {
+                                "claimName": env.parked_claim,
+                                "readOnly": True,
+                            },
+                        }
+                    ]
+                    if env.parked_claim
+                    else []
+                ),
             ],
         }
         if env.priority_class:
