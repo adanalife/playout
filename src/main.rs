@@ -192,6 +192,11 @@ async fn run(platform: String, deployment_env: String) -> Result<()> {
     let meter_provider = telemetry::init(&platform, &deployment_env);
 
     let files = scan_video_dir(&video_dir)?;
+    let parked_dirs: Vec<PathBuf> = env_or("PARKED_DIRS", "")
+        .split(',')
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .collect();
     let corpora: Vec<&'static str> = files
         .iter()
         .map(|f| player::corpus_of(f.strip_prefix(&video_dir).unwrap_or(f)))
@@ -200,6 +205,7 @@ async fn run(platform: String, deployment_env: String) -> Result<()> {
     info!(
         clips = files.len(),
         video_dir = %video_dir,
+        ?parked_dirs,
         ?mode,
         output = %output,
         encoder = %encoder_name,
@@ -317,6 +323,7 @@ async fn run(platform: String, deployment_env: String) -> Result<()> {
         pipeline: pipeline.clone(),
         concat,
         files,
+        parked_dirs,
         corpora,
         mode: Mutex::new(mode),
         riding: Mutex::new(None),

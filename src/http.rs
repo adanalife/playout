@@ -10,6 +10,7 @@ use gst::prelude::*;
 use gstreamer as gst;
 use serde::Deserialize;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 use tracing::warn;
@@ -27,9 +28,44 @@ struct FrameQuery {
 // ponytail: a fixed cap of 2; make it a setting if a second consumer appears.
 static GRABS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
-/// One frame of a playlist clip as a JPEG, for the console's clip page. The
-/// clip is named by basename, the way `play.at` names it, and resolved
-/// against the playlist — so there is no path to traverse and an unknown
+/// The file a clip name stands for: its playlist entry, else a file of that
+/// name in one of the parked directories. The name must be a bare file name
+/// — anything with a path in it resolves to nothing — so there is no path to
+/// traverse. Stats the parked directories, so call it off the async runtime:
+/// they are an NFS mount, and a stat on a dead one can take its timeout.
+pub(crate) fn locate(files: &[PathBuf], parked_dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    if let Some(p) = files
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(name))
+    {
+        return Some(p.clone());
+    }
+    if std::path::Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        != Some(name)
+    {
+        return None;
+    }
+    parked_dirs
+        .iter()
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
+}
+
+/// `locate` for a request: the player's playlist and parked directories, on
+/// the blocking pool.
+async fn locate_for(player: &SharedPlayer, name: String) -> Option<PathBuf> {
+    let player = player.clone();
+    tokio::task::spawn_blocking(move || locate(&player.files, &player.parked_dirs, &name))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// One frame of a clip as a JPEG, for the console's clip page. The clip is
+/// named by basename, the way `play.at` names it, and resolved against the
+/// playlist and then the parked directories (see `locate`) — an unknown
 /// name is a 404. The corpus is immutable, so the picture may be cached for
 /// a week.
 async fn frame(
@@ -37,10 +73,9 @@ async fn frame(
     Path(name): Path<String>,
     Query(q): Query<FrameQuery>,
 ) -> Response {
-    let Some(index) = player.find(&name) else {
+    let Some(path) = locate_for(&player, name.clone()).await else {
         return (StatusCode::NOT_FOUND, "no such clip").into_response();
     };
-    let path = player.files[index].clone();
     let at_ms = (q.at.max(0.0) * 1000.0) as u64;
     let _slot = GRABS.acquire().await.expect("semaphore never closes");
     let grab = tokio::task::spawn_blocking(move || crate::frame::grab(&path, at_ms));
@@ -78,10 +113,9 @@ async fn clip(
     Path(name): Path<String>,
     req: Request,
 ) -> Response {
-    let Some(index) = player.find(&name) else {
+    let Some(path) = locate_for(&player, name).await else {
         return (StatusCode::NOT_FOUND, "no such clip").into_response();
     };
-    let path = player.files[index].clone();
     clip_response(&path, req).await
 }
 
@@ -210,6 +244,29 @@ mod tests {
         assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
         let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
         assert_eq!(&body[..], b"2345");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn locate_prefers_the_playlist_then_falls_back_to_a_parked_dir() {
+        let dir = std::env::temp_dir().join(format!("playout-locate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("new.MP4"), b"x").unwrap();
+        let files = vec![PathBuf::from("/corpus/aired.MP4")];
+        let parked = vec![dir.clone()];
+        assert_eq!(
+            locate(&files, &parked, "aired.MP4"),
+            Some(PathBuf::from("/corpus/aired.MP4"))
+        );
+        assert_eq!(
+            locate(&files, &parked, "new.MP4"),
+            Some(dir.join("new.MP4"))
+        );
+        assert_eq!(locate(&files, &parked, "missing.MP4"), None);
+        // No path in a name: neither a parent nor a sibling directory resolves.
+        assert_eq!(locate(&files, &parked, ".."), None);
+        assert_eq!(locate(&files, &parked, "../new.MP4"), None);
+        assert_eq!(locate(&files, &[], "new.MP4"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
