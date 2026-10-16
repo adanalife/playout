@@ -2,6 +2,13 @@
 
 <!-- towncrier release notes start -->
 
+## [v1.4.0] — 2026-10-16
+
+### Added
+
+- Stage playout mounts the pipeline's output export read-only as `/opt/data/parked` and points `PARKED_DIRS` at the season-2 clip directories, so the console can preview a clip before it airs. ([#212](https://github.com/adanalife/playout/pull/212))
+- `/frame` and `/clip` fall back to the directories `PARKED_DIRS` names when a clip isn't in the playlist, so the console can preview a clip that doesn't air here yet; the playlist itself is unchanged. ([#213](https://github.com/adanalife/playout/pull/213))
+
 ## [v1.3.0] — 2026-10-15
 
 ### Added
