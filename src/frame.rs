@@ -38,6 +38,16 @@ pub(crate) fn grab(path: &Path, at_ms: u64) -> Result<Vec<u8>> {
     // alone it keeps the source height and records the squeeze in the
     // pixel-aspect-ratio, which a JPEG viewer ignores.
     playbin.set_property_from_str("flags", "video");
+    // One decode thread: libav's decoder otherwise starts one per core for a
+    // single keyframe, and every one of those threads leaves a malloc arena
+    // behind. element-setup reaches the elements decodebin adds too.
+    playbin.connect("element-setup", false, |args| {
+        let element = args[1].get::<gst::Element>().ok()?;
+        if element.find_property("max-threads").is_some() {
+            element.set_property("max-threads", 1i32);
+        }
+        None
+    });
     let sink = gst::parse::bin_from_description(
         &format!(
             "videoconvert ! videoscale ! video/x-raw,width={WIDTH},pixel-aspect-ratio=1/1 ! jpegenc ! appsink name=sink sync=false"
