@@ -63,17 +63,29 @@ pub(crate) fn grab(path: &Path, at_ms: u64) -> Result<Vec<u8>> {
 }
 
 fn grab_from(playbin: &gst::Element, sink: &gst::Bin, at_ms: u64) -> Result<Vec<u8>> {
+    // One deadline across both prerolls, so a whole grab ends within BUDGET.
+    // The caller's concurrency slot is held until this returns, so this
+    // deadline is what bounds how long a wedged decode keeps its slot.
+    let deadline = std::time::Instant::now() + BUDGET;
+    let preroll = |what: &'static str| -> Result<()> {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let (res, _, _) = playbin.state(gst::ClockTime::from_nseconds(left.as_nanos() as u64));
+        // Async is the wait running out, not a preroll; pulling a frame then
+        // would block on a preroll that may never come.
+        match res.context(what)? {
+            gst::StateChangeSuccess::Async => Err(anyhow!("{what}: timed out")),
+            _ => Ok(()),
+        }
+    };
     let appsink = sink.by_name("sink").context("appsink")?;
     playbin.set_state(gst::State::Paused)?;
-    let (res, _, _) = playbin.state(gst::ClockTime::from_seconds(BUDGET.as_secs()));
-    res.context("preroll")?;
+    preroll("preroll")?;
     if at_ms > 0 {
         playbin.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT | gst::SeekFlags::SNAP_BEFORE,
             gst::ClockTime::from_mseconds(at_ms),
         )?;
-        let (res, _, _) = playbin.state(gst::ClockTime::from_seconds(BUDGET.as_secs()));
-        res.context("preroll after seek")?;
+        preroll("preroll after seek")?;
     }
     // appsink's action signal; the gstreamer-app crate would wrap the same
     // call and is not otherwise a dependency.
