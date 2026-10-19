@@ -294,6 +294,12 @@ class PlayoutInstance(Construct):
                 # ExternalSecret syncs; the binary no-ops without SENTRY_DSN.
                 {"secretRef": {"name": SENTRY_SECRET, "optional": True}},
             ],
+            "env": [
+                # glibc gives each thread its own malloc arena and keeps what
+                # it frees; every /frame grab spins up decoder threads, so RSS
+                # stepped up per burst of grabs until the pod was OOMKilled.
+                {"name": "MALLOC_ARENA_MAX", "value": "2"},
+            ],
             "volumeMounts": [
                 {
                     "name": "dashcam",
