@@ -77,8 +77,14 @@ async fn frame(
         return (StatusCode::NOT_FOUND, "no such clip").into_response();
     };
     let at_ms = (q.at.max(0.0) * 1000.0) as u64;
-    let _slot = GRABS.acquire().await.expect("semaphore never closes");
-    let grab = tokio::task::spawn_blocking(move || crate::frame::grab(&path, at_ms));
+    let slot = GRABS.acquire().await.expect("semaphore never closes");
+    // The permit rides with the decode, not the request: a timed-out or
+    // disconnected request leaves its blocking task running, and that task
+    // still holds one of the two slots until `grab` returns.
+    let grab = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        crate::frame::grab(&path, at_ms)
+    });
     match tokio::time::timeout(crate::frame::BUDGET, grab).await {
         Ok(Ok(Ok(jpeg))) => (
             [
