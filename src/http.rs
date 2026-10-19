@@ -143,10 +143,13 @@ async fn clip_response(path: &std::path::Path, req: Request) -> Response {
             return (StatusCode::GATEWAY_TIMEOUT, "clip open timed out").into_response();
         }
     };
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("public, max-age=604800"),
-    );
+    // Only a served clip is cacheable: a 404 or 416 must not stick for a week.
+    if resp.status().is_success() {
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("public, max-age=604800"),
+        );
+    }
     resp
 }
 
@@ -261,8 +264,27 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(resp.headers()[header::CONTENT_TYPE], "video/mp4");
         assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
+        assert!(resp.headers().contains_key(header::CACHE_CONTROL));
         let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
         assert_eq!(&body[..], b"2345");
+
+        // An error status carries no cache header.
+        for (file, range) in [
+            (path.clone(), "bytes=50-60"),
+            (dir.join("gone.MP4"), "bytes=0-1"),
+        ] {
+            let req = Request::builder()
+                .header(header::RANGE, range)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = clip_response(&file, req).await;
+            assert!(
+                resp.status().is_client_error(),
+                "{range}: {}",
+                resp.status()
+            );
+            assert!(!resp.headers().contains_key(header::CACHE_CONTROL));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
