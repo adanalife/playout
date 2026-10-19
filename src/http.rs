@@ -54,13 +54,22 @@ pub(crate) fn locate(files: &[PathBuf], parked_dirs: &[PathBuf], name: &str) -> 
 }
 
 /// `locate` for a request: the player's playlist and parked directories, on
-/// the blocking pool.
-async fn locate_for(player: &SharedPlayer, name: String) -> Option<PathBuf> {
+/// the blocking pool, within the grab's budget. The response to send instead
+/// is the error: 404 for an unknown name, 504 when a stalled mount outlasts
+/// the budget.
+async fn locate_for(player: &SharedPlayer, name: String) -> Result<PathBuf, Response> {
     let player = player.clone();
-    tokio::task::spawn_blocking(move || locate(&player.files, &player.parked_dirs, &name))
-        .await
-        .ok()
-        .flatten()
+    let clip = name.clone();
+    let lookup =
+        tokio::task::spawn_blocking(move || locate(&player.files, &player.parked_dirs, &name));
+    match tokio::time::timeout(crate::frame::BUDGET, lookup).await {
+        Ok(Ok(Some(path))) => Ok(path),
+        Ok(_) => Err((StatusCode::NOT_FOUND, "no such clip").into_response()),
+        Err(_) => {
+            warn!(clip = %clip, "clip lookup timed out");
+            Err((StatusCode::GATEWAY_TIMEOUT, "clip lookup timed out").into_response())
+        }
+    }
 }
 
 /// One frame of a clip as a JPEG, for the console's clip page. The clip is
@@ -73,8 +82,9 @@ async fn frame(
     Path(name): Path<String>,
     Query(q): Query<FrameQuery>,
 ) -> Response {
-    let Some(path) = locate_for(&player, name.clone()).await else {
-        return (StatusCode::NOT_FOUND, "no such clip").into_response();
+    let path = match locate_for(&player, name.clone()).await {
+        Ok(path) => path,
+        Err(resp) => return resp,
     };
     let at_ms = (q.at.max(0.0) * 1000.0) as u64;
     let slot = GRABS.acquire().await.expect("semaphore never closes");
@@ -119,8 +129,9 @@ async fn clip(
     Path(name): Path<String>,
     req: Request,
 ) -> Response {
-    let Some(path) = locate_for(&player, name).await else {
-        return (StatusCode::NOT_FOUND, "no such clip").into_response();
+    let path = match locate_for(&player, name).await {
+        Ok(path) => path,
+        Err(resp) => return resp,
     };
     clip_response(&path, req).await
 }
@@ -129,11 +140,22 @@ async fn clip_response(path: &std::path::Path, req: Request) -> Response {
     // The extension is upper-case on most of the corpus, so the type is named
     // rather than guessed.
     let file = ServeFile::new_with_mime(path, &"video/mp4".parse().expect("valid mime"));
-    let mut resp = file.oneshot(req).await.into_response();
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("public, max-age=604800"),
-    );
+    // The budget bounds the open and the headers; a body that stalls once
+    // streaming has begun is left to the client's own timeout.
+    let mut resp = match tokio::time::timeout(crate::frame::BUDGET, file.oneshot(req)).await {
+        Ok(served) => served.into_response(),
+        Err(_) => {
+            warn!(clip = %path.display(), "clip open timed out");
+            return (StatusCode::GATEWAY_TIMEOUT, "clip open timed out").into_response();
+        }
+    };
+    // Only a served clip is cacheable: a 404 or 416 must not stick for a week.
+    if resp.status().is_success() {
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("public, max-age=604800"),
+        );
+    }
     resp
 }
 
@@ -248,8 +270,27 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(resp.headers()[header::CONTENT_TYPE], "video/mp4");
         assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
+        assert!(resp.headers().contains_key(header::CACHE_CONTROL));
         let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
         assert_eq!(&body[..], b"2345");
+
+        // An error status carries no cache header.
+        for (file, range) in [
+            (path.clone(), "bytes=50-60"),
+            (dir.join("gone.MP4"), "bytes=0-1"),
+        ] {
+            let req = Request::builder()
+                .header(header::RANGE, range)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = clip_response(&file, req).await;
+            assert!(
+                resp.status().is_client_error(),
+                "{range}: {}",
+                resp.status()
+            );
+            assert!(!resp.headers().contains_key(header::CACHE_CONTROL));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
