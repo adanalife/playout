@@ -10,6 +10,7 @@ metadata:
   namespace: stage-1
 data:
   VIDEO_DIR: /opt/data/Dashcam/_all
+  PARKED_DIRS: /opt/data/parked/s2/clips,/opt/data/parked/s2fast/clips
   OUTPUT: rtsp
   ENCODER: passthrough
   RTSP_URL: rtsp://mediamtx-instagram:8554/dashcam
@@ -47,7 +48,7 @@ spec:
         app.kubernetes.io/instance: playout-instagram
         app.kubernetes.io/part-of: tripbot
       annotations:
-        adanalife.dev/config-hash: 080b774b22
+        adanalife.dev/config-hash: 5b90a4bce7
     spec:
       securityContext:
         seccompProfile:
@@ -69,9 +70,15 @@ spec:
             - secretRef:
                 name: sentry-playout
                 optional: true
+          env:
+            - name: MALLOC_ARENA_MAX
+              value: "2"
           volumeMounts:
             - name: dashcam
               mountPath: /opt/data/Dashcam/_all
+              readOnly: true
+            - name: parked
+              mountPath: /opt/data/parked
               readOnly: true
           resources:
             requests:
@@ -97,6 +104,10 @@ spec:
         - name: dashcam
           persistentVolumeClaim:
             claimName: vlc-dashcam
+            readOnly: true
+        - name: parked
+          persistentVolumeClaim:
+            claimName: dashcam-parked
             readOnly: true
 ---
 apiVersion: v1

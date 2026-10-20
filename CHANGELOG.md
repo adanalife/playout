@@ -2,6 +2,32 @@
 
 <!-- towncrier release notes start -->
 
+## [v1.4.1] — 2026-10-19
+
+### Fixed
+
+- `/clip` sends its week-long `Cache-Control` only with a served clip, so a 404 or 416 is never cached. ([#216](https://github.com/adanalife/playout/pull/216))
+- `/clip` and the clip lookup behind `/frame` give up with a 504 after the 10-second grab budget instead of hanging on a stalled mount. ([#216](https://github.com/adanalife/playout/pull/216))
+- Thumbnail frame grabs keep their concurrency slot until the decode finishes, and a whole grab ends within its 10-second budget, so a burst of stills can no longer run more than two decodes at once. ([#217](https://github.com/adanalife/playout/pull/217))
+- Still-frame grabs no longer ratchet playout's memory up until the pod is OOMKilled: glibc malloc arenas are capped at two and each still decodes on a single thread. ([#218](https://github.com/adanalife/playout/pull/218))
+
+## [v1.4.0] — 2026-10-16
+
+### Added
+
+- Stage playout mounts the pipeline's output export read-only as `/opt/data/parked` and points `PARKED_DIRS` at the season-2 clip directories, so the console can preview a clip before it airs. ([#212](https://github.com/adanalife/playout/pull/212))
+- `/frame` and `/clip` fall back to the directories `PARKED_DIRS` names when a clip isn't in the playlist, so the console can preview a clip that doesn't air here yet; the playlist itself is unchanged. ([#213](https://github.com/adanalife/playout/pull/213))
+
+## [v1.3.0] — 2026-10-15
+
+### Added
+
+- `GET /clip/{name}` serves a playlist clip with HTTP range requests, for the console's clip page to play. ([#210](https://github.com/adanalife/playout/pull/210))
+
+### Fixed
+
+- The clip-page still keeps the clip's 16:9 shape instead of coming out 640×1080. ([#209](https://github.com/adanalife/playout/pull/209))
+
 ## [v1.2.0] — 2026-10-15
 
 ### Added

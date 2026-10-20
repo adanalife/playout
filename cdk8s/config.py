@@ -76,6 +76,11 @@ class EnvConfig:
     # iGPU), but the knob and its resource request stay so a future env with
     # spare iGPU headroom can switch to VAAPI encode by flipping one flag.
     gpu: bool = False  # request gpu.intel.com/i915 (VAAPI encode)
+    # PVC over the pipeline's output export, mounted read-only beside the corpus
+    # so /frame and /clip can answer for a clip that doesn't air here yet (the
+    # console's video page, as season-2 clips are ingested). Nothing in it
+    # reaches the playlist. Stage only: prod's stream path never mounts the NAS.
+    parked_claim: str = ""
     priority_class: str = ""  # prod-stream on prod; "" elsewhere
 
     def tag_for(self, component: str) -> str:
@@ -124,5 +129,6 @@ ENVS: dict[str, EnvConfig] = {
         # Same encode mode as prod so the stage soak transfers.
         cpu_request="2",
         encoder="passthrough",
+        parked_claim="dashcam-parked",
     ),
 }

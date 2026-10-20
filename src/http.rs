@@ -1,7 +1,7 @@
 use crate::SharedPlayer;
 use axum::{
     Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
@@ -10,6 +10,9 @@ use gst::prelude::*;
 use gstreamer as gst;
 use serde::Deserialize;
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use tower::ServiceExt;
+use tower_http::services::ServeFile;
 use tracing::warn;
 
 #[derive(Deserialize)]
@@ -25,9 +28,53 @@ struct FrameQuery {
 // ponytail: a fixed cap of 2; make it a setting if a second consumer appears.
 static GRABS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
-/// One frame of a playlist clip as a JPEG, for the console's clip page. The
-/// clip is named by basename, the way `play.at` names it, and resolved
-/// against the playlist — so there is no path to traverse and an unknown
+/// The file a clip name stands for: its playlist entry, else a file of that
+/// name in one of the parked directories. The name must be a bare file name
+/// — anything with a path in it resolves to nothing — so there is no path to
+/// traverse. Stats the parked directories, so call it off the async runtime:
+/// they are an NFS mount, and a stat on a dead one can take its timeout.
+pub(crate) fn locate(files: &[PathBuf], parked_dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    if let Some(p) = files
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(name))
+    {
+        return Some(p.clone());
+    }
+    if std::path::Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        != Some(name)
+    {
+        return None;
+    }
+    parked_dirs
+        .iter()
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
+}
+
+/// `locate` for a request: the player's playlist and parked directories, on
+/// the blocking pool, within the grab's budget. The response to send instead
+/// is the error: 404 for an unknown name, 504 when a stalled mount outlasts
+/// the budget.
+async fn locate_for(player: &SharedPlayer, name: String) -> Result<PathBuf, Response> {
+    let player = player.clone();
+    let clip = name.clone();
+    let lookup =
+        tokio::task::spawn_blocking(move || locate(&player.files, &player.parked_dirs, &name));
+    match tokio::time::timeout(crate::frame::BUDGET, lookup).await {
+        Ok(Ok(Some(path))) => Ok(path),
+        Ok(_) => Err((StatusCode::NOT_FOUND, "no such clip").into_response()),
+        Err(_) => {
+            warn!(clip = %clip, "clip lookup timed out");
+            Err((StatusCode::GATEWAY_TIMEOUT, "clip lookup timed out").into_response())
+        }
+    }
+}
+
+/// One frame of a clip as a JPEG, for the console's clip page. The clip is
+/// named by basename, the way `play.at` names it, and resolved against the
+/// playlist and then the parked directories (see `locate`) — an unknown
 /// name is a 404. The corpus is immutable, so the picture may be cached for
 /// a week.
 async fn frame(
@@ -35,13 +82,19 @@ async fn frame(
     Path(name): Path<String>,
     Query(q): Query<FrameQuery>,
 ) -> Response {
-    let Some(index) = player.find(&name) else {
-        return (StatusCode::NOT_FOUND, "no such clip").into_response();
+    let path = match locate_for(&player, name.clone()).await {
+        Ok(path) => path,
+        Err(resp) => return resp,
     };
-    let path = player.files[index].clone();
     let at_ms = (q.at.max(0.0) * 1000.0) as u64;
-    let _slot = GRABS.acquire().await.expect("semaphore never closes");
-    let grab = tokio::task::spawn_blocking(move || crate::frame::grab(&path, at_ms));
+    let slot = GRABS.acquire().await.expect("semaphore never closes");
+    // The permit rides with the decode, not the request: a timed-out or
+    // disconnected request leaves its blocking task running, and that task
+    // still holds one of the two slots until `grab` returns.
+    let grab = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        crate::frame::grab(&path, at_ms)
+    });
     match tokio::time::timeout(crate::frame::BUDGET, grab).await {
         Ok(Ok(Ok(jpeg))) => (
             [
@@ -64,6 +117,46 @@ async fn frame(
             (StatusCode::GATEWAY_TIMEOUT, "frame grab timed out").into_response()
         }
     }
+}
+
+/// A playlist clip's bytes, for the console's clip page to play. Named and
+/// resolved like `/frame`, so an unknown name is a 404 and there is no path to
+/// traverse. Range requests are honoured, so a browser seeking to the moment
+/// the page names reads only the bytes it plays — no decode, no encode, just
+/// the file off the mount.
+async fn clip(
+    State(player): State<SharedPlayer>,
+    Path(name): Path<String>,
+    req: Request,
+) -> Response {
+    let path = match locate_for(&player, name).await {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
+    clip_response(&path, req).await
+}
+
+async fn clip_response(path: &std::path::Path, req: Request) -> Response {
+    // The extension is upper-case on most of the corpus, so the type is named
+    // rather than guessed.
+    let file = ServeFile::new_with_mime(path, &"video/mp4".parse().expect("valid mime"));
+    // The budget bounds the open and the headers; a body that stalls once
+    // streaming has begun is left to the client's own timeout.
+    let mut resp = match tokio::time::timeout(crate::frame::BUDGET, file.oneshot(req)).await {
+        Ok(served) => served.into_response(),
+        Err(_) => {
+            warn!(clip = %path.display(), "clip open timed out");
+            return (StatusCode::GATEWAY_TIMEOUT, "clip open timed out").into_response();
+        }
+    };
+    // Only a served clip is cacheable: a 404 or 416 must not stick for a week.
+    if resp.status().is_success() {
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("public, max-age=604800"),
+        );
+    }
+    resp
 }
 
 /// Process-is-alive signal: if this handler runs at all, the answer is yes.
@@ -138,6 +231,7 @@ pub async fn run(player: SharedPlayer) {
         .route("/playout/current", get(current))
         .route("/debug/pipeline", get(pipeline_dot))
         .route("/frame/{name}", get(frame))
+        .route("/clip/{name}", get(clip))
         .with_state(player);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -159,6 +253,68 @@ mod tests {
             let (status, _) = ready_response(state);
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         }
+    }
+
+    #[tokio::test]
+    async fn clip_honours_a_range_request() {
+        let dir = std::env::temp_dir().join(format!("playout-clip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.MP4");
+        std::fs::write(&path, b"0123456789").unwrap();
+
+        let req = Request::builder()
+            .header(header::RANGE, "bytes=2-5")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = clip_response(&path, req).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "video/mp4");
+        assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
+        assert!(resp.headers().contains_key(header::CACHE_CONTROL));
+        let body = axum::body::to_bytes(resp.into_body(), 64).await.unwrap();
+        assert_eq!(&body[..], b"2345");
+
+        // An error status carries no cache header.
+        for (file, range) in [
+            (path.clone(), "bytes=50-60"),
+            (dir.join("gone.MP4"), "bytes=0-1"),
+        ] {
+            let req = Request::builder()
+                .header(header::RANGE, range)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = clip_response(&file, req).await;
+            assert!(
+                resp.status().is_client_error(),
+                "{range}: {}",
+                resp.status()
+            );
+            assert!(!resp.headers().contains_key(header::CACHE_CONTROL));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn locate_prefers_the_playlist_then_falls_back_to_a_parked_dir() {
+        let dir = std::env::temp_dir().join(format!("playout-locate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("new.MP4"), b"x").unwrap();
+        let files = vec![PathBuf::from("/corpus/aired.MP4")];
+        let parked = vec![dir.clone()];
+        assert_eq!(
+            locate(&files, &parked, "aired.MP4"),
+            Some(PathBuf::from("/corpus/aired.MP4"))
+        );
+        assert_eq!(
+            locate(&files, &parked, "new.MP4"),
+            Some(dir.join("new.MP4"))
+        );
+        assert_eq!(locate(&files, &parked, "missing.MP4"), None);
+        // No path in a name: neither a parent nor a sibling directory resolves.
+        assert_eq!(locate(&files, &parked, ".."), None);
+        assert_eq!(locate(&files, &parked, "../new.MP4"), None);
+        assert_eq!(locate(&files, &[], "new.MP4"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

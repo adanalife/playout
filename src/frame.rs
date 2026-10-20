@@ -33,11 +33,24 @@ pub(crate) fn grab(path: &Path, at_ms: u64) -> Result<Vec<u8>> {
         .build()
         .context("playbin")?;
     // Video only: the audio track is never decoded, and nothing is rendered —
-    // the sink bin ends in an appsink the frame is pulled from.
+    // the sink bin ends in an appsink the frame is pulled from. Square pixels
+    // are pinned so videoscale derives the height from the width; with width
+    // alone it keeps the source height and records the squeeze in the
+    // pixel-aspect-ratio, which a JPEG viewer ignores.
     playbin.set_property_from_str("flags", "video");
+    // One decode thread: libav's decoder otherwise starts one per core for a
+    // single keyframe, and every one of those threads leaves a malloc arena
+    // behind. element-setup reaches the elements decodebin adds too.
+    playbin.connect("element-setup", false, |args| {
+        let element = args[1].get::<gst::Element>().ok()?;
+        if element.find_property("max-threads").is_some() {
+            element.set_property("max-threads", 1i32);
+        }
+        None
+    });
     let sink = gst::parse::bin_from_description(
         &format!(
-            "videoconvert ! videoscale ! video/x-raw,width={WIDTH} ! jpegenc ! appsink name=sink sync=false"
+            "videoconvert ! videoscale ! video/x-raw,width={WIDTH},pixel-aspect-ratio=1/1 ! jpegenc ! appsink name=sink sync=false"
         ),
         true,
     )
@@ -50,17 +63,29 @@ pub(crate) fn grab(path: &Path, at_ms: u64) -> Result<Vec<u8>> {
 }
 
 fn grab_from(playbin: &gst::Element, sink: &gst::Bin, at_ms: u64) -> Result<Vec<u8>> {
+    // One deadline across both prerolls, so a whole grab ends within BUDGET.
+    // The caller's concurrency slot is held until this returns, so this
+    // deadline is what bounds how long a wedged decode keeps its slot.
+    let deadline = std::time::Instant::now() + BUDGET;
+    let preroll = |what: &'static str| -> Result<()> {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let (res, _, _) = playbin.state(gst::ClockTime::from_nseconds(left.as_nanos() as u64));
+        // Async is the wait running out, not a preroll; pulling a frame then
+        // would block on a preroll that may never come.
+        match res.context(what)? {
+            gst::StateChangeSuccess::Async => Err(anyhow!("{what}: timed out")),
+            _ => Ok(()),
+        }
+    };
     let appsink = sink.by_name("sink").context("appsink")?;
     playbin.set_state(gst::State::Paused)?;
-    let (res, _, _) = playbin.state(gst::ClockTime::from_seconds(BUDGET.as_secs()));
-    res.context("preroll")?;
+    preroll("preroll")?;
     if at_ms > 0 {
         playbin.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT | gst::SeekFlags::SNAP_BEFORE,
             gst::ClockTime::from_mseconds(at_ms),
         )?;
-        let (res, _, _) = playbin.state(gst::ClockTime::from_seconds(BUDGET.as_secs()));
-        res.context("preroll after seek")?;
+        preroll("preroll after seek")?;
     }
     // appsink's action signal; the gstreamer-app crate would wrap the same
     // call and is not otherwise a dependency.
@@ -113,6 +138,16 @@ mod tests {
         Some(path)
     }
 
+    /// (width, height) from the JPEG's baseline start-of-frame (SOF0) header.
+    fn dimensions(jpeg: &[u8]) -> (u32, u32) {
+        let at = jpeg
+            .windows(2)
+            .position(|w| w == [0xFF, 0xC0])
+            .expect("no SOF0 marker");
+        let be = |i: usize| u32::from(jpeg[at + i]) << 8 | u32::from(jpeg[at + i + 1]);
+        (be(7), be(5))
+    }
+
     #[test]
     fn grabs_a_jpeg_at_the_top_and_mid_clip() {
         let dir = std::env::temp_dir().join(format!("playout-frame-{}", std::process::id()));
@@ -125,6 +160,7 @@ mod tests {
             // JPEG SOI marker, and a real picture rather than a header.
             assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "at {at_ms} ms");
             assert!(jpeg.len() > 1000, "at {at_ms} ms: {} bytes", jpeg.len());
+            assert_eq!(dimensions(&jpeg), (WIDTH, WIDTH * 9 / 16), "at {at_ms} ms");
         }
         // Past the end: the seek clamps to the last keyframe rather than failing.
         assert!(grab(&clip, 60_000).is_ok());
