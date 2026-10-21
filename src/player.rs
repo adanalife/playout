@@ -24,6 +24,8 @@ pub(crate) struct Clip {
     offset_ms: i64,
     /// Pipeline running time when this clip became active; None until then.
     start_rt: Option<gst::ClockTime>,
+    /// Spawned with an offset whose seek `finish_seek` hasn't done yet.
+    seek_pending: bool,
 }
 
 /// Everything the clip-spawning path needs to hang on to. Clip bins come and
@@ -474,6 +476,7 @@ impl Player {
             index,
             offset_ms,
             start_rt: None,
+            seek_pending: offset_ms > 0,
         });
         self.pipeline.add(&decode).expect("adding clip bin");
         decode.sync_state_with_parent().expect("starting clip bin");
@@ -490,6 +493,10 @@ impl Player {
         probes: Arc<Mutex<Vec<gst::PadProbeId>>>,
         offset_ms: i64,
     ) {
+        // A jump cut this clip out before its first buffer: nothing to seek.
+        if !self.clips.lock().unwrap().iter().any(|c| c.bin == decode) {
+            return;
+        }
         let mut offset_ms = offset_ms;
         let duration_ms = decode
             .query_duration::<gst::ClockTime>()
@@ -530,6 +537,7 @@ impl Player {
             .find(|c| c.bin == decode)
         {
             clip.offset_ms = offset_ms;
+            clip.seek_pending = false;
         }
     }
 
@@ -542,6 +550,12 @@ impl Player {
         decode.set_state(gst::State::Null).ok();
         self.pipeline.remove(decode).ok();
         self.concat.release_request_pad(pad);
+        self.promote();
+    }
+
+    /// clips[0] has just gone: stamp the promoted clip active and preroll its
+    /// successor, keeping the pipeline at active + prerolled-next.
+    fn promote(self: &Arc<Self>) {
         self.mark_active();
         let next = self
             .clips
@@ -705,11 +719,31 @@ impl Player {
     /// The stdin `j` analogue: finish the active clip *now*. Its EOS probe
     /// promotes the already-prerolled next clip through the same long-lived
     /// encoder — same mechanism as a natural boundary.
-    pub(crate) fn jump(&self) {
-        let active = self.clips.lock().unwrap().first().map(|c| c.bin.clone());
-        if let Some(active) = active {
-            active.send_event(gst::event::Eos::new());
+    ///
+    /// A clip still waiting on its seek can't be finished that way: the seek's
+    /// probes drop the EOS, and its flush discards one queued behind them, so
+    /// the clip would play out in full. It is cut instead, like a failed clip —
+    /// releasing its concat pad is what moves concat on. Main loop only.
+    pub(crate) fn jump(self: &Arc<Self>) {
+        let Some((bin, pad, seek_pending)) = self
+            .clips
+            .lock()
+            .unwrap()
+            .first()
+            .map(|c| (c.bin.clone(), c.pad.clone(), c.seek_pending))
+        else {
+            return;
+        };
+        if !seek_pending {
+            bin.send_event(gst::event::Eos::new());
+            return;
         }
+        info!("cutting a clip whose seek is still pending");
+        self.clips.lock().unwrap().retain(|c| c.bin != bin);
+        self.concat.release_request_pad(&pad);
+        bin.set_state(gst::State::Null).ok();
+        self.pipeline.remove(&bin).ok();
+        self.promote();
     }
 
     /// Basename of the active clip (`2018_0704_120000.MP4`), as served over
