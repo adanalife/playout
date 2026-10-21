@@ -367,7 +367,10 @@ async fn run(platform: String, deployment_env: String) -> Result<()> {
         for line in std::io::stdin().lines() {
             let Ok(line) = line else { break };
             match line.trim() {
-                "j" => player_stdin.jump(),
+                "j" => {
+                    let player = Arc::clone(&player_stdin);
+                    glib::idle_add_once(move || player.jump());
+                }
                 "q" => {
                     loop_stdin.quit();
                     break;

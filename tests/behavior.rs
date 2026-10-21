@@ -1095,3 +1095,46 @@ async fn sigterm_exits_clean() {
     });
     assert!(status.success(), "SIGTERM exit was {status:?}");
 }
+
+/// A command that lands while a seeked clip is still waiting on its seek — it
+/// goes on air the moment the previous clip ends, a second or more before the
+/// seek completes — must still move playback. An EOS sent then is dropped by
+/// the seek's probes, so the clip would play out in full (minutes in prod)
+/// with the command silently lost.
+#[tokio::test]
+async fn a_command_during_a_pending_seek_still_lands() {
+    serial_or_skip!();
+    let (_nats, nport) = start_nats();
+    let (_mtx, mport) = start_mediamtx();
+    let p = start_playout(long_corpus(), Some(nport), mport, "youtube");
+    wait_ready(p.http);
+    wait_current(p.http, "initial clip", |c| !c.is_empty());
+    for round in 0..3 {
+        publish_command(nport, "youtube", "play.file", r#"{"file":"clip_c.mp4"}"#).await;
+        wait_current(p.http, "a settled start", |c| c == "clip_c.mp4");
+        publish_command(
+            nport,
+            "youtube",
+            "play.at",
+            r#"{"file":"clip_b.mp4","position_ms":5000}"#,
+        )
+        .await;
+        // Poll tighter than wait_current so the next command lands inside the
+        // window, not after the seek has finished.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while current(p.http) != "clip_b.mp4" {
+            assert!(
+                Instant::now() < deadline,
+                "round {round}: play.at never landed"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        publish_command(nport, "youtube", "back", r#"{"n":1}"#).await;
+        // 15s of clip_b remain past the offset: a lost back reads as a timeout.
+        wait_for(
+            &format!("round {round}: back during the pending seek"),
+            Duration::from_secs(8),
+            || (current(p.http) == "clip_a.mp4").then_some(()),
+        );
+    }
+}
