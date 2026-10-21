@@ -83,7 +83,10 @@ fn grab_from(playbin: &gst::Element, sink: &gst::Bin, at_ms: u64) -> Result<Vec<
     if at_ms > 0 {
         playbin.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT | gst::SeekFlags::SNAP_BEFORE,
-            gst::ClockTime::from_mseconds(at_ms),
+            // `at` is a query parameter: past ~584 years in ms the nanosecond
+            // ClockTime overflows and panics. A day is past any clip's end,
+            // where the seek clamps to the last keyframe anyway.
+            gst::ClockTime::from_mseconds(at_ms.min(86_400_000)),
         )?;
         preroll("preroll after seek")?;
     }
@@ -164,6 +167,8 @@ mod tests {
         }
         // Past the end: the seek clamps to the last keyframe rather than failing.
         assert!(grab(&clip, 60_000).is_ok());
+        // An absurd `at` is the same past-the-end seek, not a panic.
+        assert!(grab(&clip, u64::MAX).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
