@@ -232,6 +232,13 @@ fn start_mediamtx() -> (Proc, u16) {
     let port = free_port();
     let child = Command::new("mediamtx")
         .env("MTX_RTSPADDRESS", format!(":{port}"))
+        // Every other listener binds a fixed port, so a second MediaMTX on the
+        // host — another `cargo test` in a sibling worktree — dies on "address
+        // in use" and the test reads "did not listen". RTSP's UDP transport
+        // owns :8000/:8001 (playout and the readers here all use TCP), MoQ
+        // owns :8892.
+        .env("MTX_RTSPTRANSPORTS", "tcp")
+        .env("MTX_MOQ", "no")
         .env("MTX_RTMP", "no")
         .env("MTX_HLS", "no")
         .env("MTX_WEBRTC", "no")
