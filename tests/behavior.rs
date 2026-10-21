@@ -77,7 +77,13 @@ fn free_port() -> u16 {
     // before handing it out.
     use std::sync::atomic::{AtomicU16, Ordering};
     static NEXT: AtomicU16 = AtomicU16::new(0);
-    let base = 20_000 + (std::process::id() % 20_000) as u16;
+    // A plain pid salt overlaps the window of a sibling `cargo test` whose pid
+    // is a few higher, and the bind probe can't see a port it has claimed but
+    // not yet bound. The multiplier puts pids up to 300 apart at least 66
+    // ports apart, more than one run claims.
+    // shortcut: probabilistic for arbitrary pid gaps (~0.5% per concurrent
+    // pair); claim ports through lock files if parallel runs become routine.
+    let base = 20_000 + (u64::from(std::process::id()) * 10_299 % 20_000) as u16;
     loop {
         let port = base + NEXT.fetch_add(1, Ordering::Relaxed) % 20_000;
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
@@ -232,6 +238,13 @@ fn start_mediamtx() -> (Proc, u16) {
     let port = free_port();
     let child = Command::new("mediamtx")
         .env("MTX_RTSPADDRESS", format!(":{port}"))
+        // Every other listener binds a fixed port, so a second MediaMTX on the
+        // host — another `cargo test` in a sibling worktree — dies on "address
+        // in use" and the test reads "did not listen". RTSP's UDP transport
+        // owns :8000/:8001 (playout and the readers here all use TCP), MoQ
+        // owns :8892.
+        .env("MTX_RTSPTRANSPORTS", "tcp")
+        .env("MTX_MOQ", "no")
         .env("MTX_RTMP", "no")
         .env("MTX_HLS", "no")
         .env("MTX_WEBRTC", "no")
