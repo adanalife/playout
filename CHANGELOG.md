@@ -2,6 +2,30 @@
 
 <!-- towncrier release notes start -->
 
+## [v1.5.0] — 2026-10-21
+
+### Added
+
+- Stage playout serves a season-2 piece's frames and bytes from the pipeline's split pieces, so the console can show a piece that was dropped before it was ever rendered. ([#221](https://github.com/adanalife/playout/pull/221))
+
+### Changed
+
+- The OpenTelemetry crates move to 0.33.1 together; the three only build in step. ([#223](https://github.com/adanalife/playout/pull/223))
+
+### Fixed
+
+- `/frame` answers an absurd `at` with the clip's last keyframe instead of panicking the grab. ([#225](https://github.com/adanalife/playout/pull/225))
+- A skip, back, or play command that lands while a seeked clip is still waiting on its seek now takes effect, instead of being lost until that clip plays out. ([#228](https://github.com/adanalife/playout/pull/228))
+
+### Security
+
+- playout takes rustls-webpki 0.103.16 and webpki-roots / webpki-root-certs 1.0.10, which reject certificate paths through the distrusted emSign intermediates (RUSTSEC-2026-0381, -0382, -0383). ([#222](https://github.com/adanalife/playout/pull/222))
+
+### CI / Tooling
+
+- `task changelog:add` takes the entry as a required `MSG="…"` and writes the fragment whole, rather than opening an editor or leaving towncrier's placeholder to fill in. ([#208](https://github.com/adanalife/playout/pull/208))
+- Run the changelog fragment-numbering self-test on every PR, so a break shows up in review rather than on the next release PR. ([#215](https://github.com/adanalife/playout/pull/215))
+
 ## [v1.4.1] — 2026-10-19
 
 ### Fixed
