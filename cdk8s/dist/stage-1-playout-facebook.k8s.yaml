@@ -10,7 +10,7 @@ metadata:
   namespace: stage-1
 data:
   VIDEO_DIR: /opt/data/Dashcam/_all
-  PARKED_DIRS: /opt/data/parked/s2/clips,/opt/data/parked/s2fast/clips
+  PARKED_DIRS: /opt/data/parked/s2/clips,/opt/data/parked/s2fast/clips,/opt/data/parked/s2/pieces
   OUTPUT: rtsp
   ENCODER: passthrough
   RTSP_URL: rtsp://mediamtx-facebook:8554/dashcam
@@ -48,7 +48,7 @@ spec:
         app.kubernetes.io/instance: playout-facebook
         app.kubernetes.io/part-of: tripbot
       annotations:
-        adanalife.dev/config-hash: 6ae86f8e12
+        adanalife.dev/config-hash: 6da2ad4ced
     spec:
       securityContext:
         seccompProfile:

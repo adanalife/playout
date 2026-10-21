@@ -34,11 +34,17 @@ CRANE_IMAGE = "gcr.io/go-containerregistry/crane:v0.21.7"
 
 # Must match the path baked into the corpus PVs.
 DASHCAM_MOUNT = "/opt/data/Dashcam/_all"
-# Where the parked claim (the pipeline's `_opt` export) mounts, and the clip
-# directories under it the console may preview from: one per season-2 corpus,
-# as the pipeline renders them (`<corpus>/clips/`).
+# Where the parked claim (the pipeline's `_opt` export) mounts, and the
+# directories under it the console may preview from: one clip dir per season-2
+# corpus, as the pipeline renders them (`<corpus>/clips/`), then the split
+# pieces (`s2/pieces/`, every corpus's), so a piece auto-trim dropped whole and
+# never rendered still has a picture. Pieces come last: a rendered clip shares
+# its piece's name and wins the lookup.
 PARKED_MOUNT = "/opt/data/parked"
 PARKED_CORPORA = ("s2", "s2fast")
+PARKED_DIRS = [f"{PARKED_MOUNT}/{c}/clips" for c in PARKED_CORPORA] + [
+    f"{PARKED_MOUNT}/s2/pieces"
+]
 
 # SM container holding playout's Sentry DSN, JSON shape {"SENTRY_DSN": "…"}.
 # Created on the infra side. One Sentry project per component; envs are
@@ -201,9 +207,7 @@ class PlayoutInstance(Construct):
             "VIDEO_DIR": DASHCAM_MOUNT,
             **(
                 {
-                    "PARKED_DIRS": ",".join(
-                        f"{PARKED_MOUNT}/{c}/clips" for c in PARKED_CORPORA
-                    )
+                    "PARKED_DIRS": ",".join(PARKED_DIRS)
                 }
                 if env.parked_claim
                 else {}
