@@ -1,0 +1,8 @@
+[advisories]
+ignore = [
+  # webpki-roots 0.26.11 (async-nats → tokio-websockets 0.10) contains no
+  # roots of its own: it re-exports webpki-roots 1.x, which Cargo.lock holds at
+  # the patched 1.0.10. The advisory still matches the 0.26 version number.
+  # Drop this once async-nats depends on webpki-roots 1.x directly.
+  "RUSTSEC-2026-0381",
+]
