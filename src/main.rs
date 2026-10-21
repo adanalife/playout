@@ -59,8 +59,8 @@ fn sends_to_sentry(deploy_env: &str) -> bool {
 }
 
 /// Recursively collect the `.mp4` files (case-insensitive) under `dir`,
-/// sorted by full path. Today's corpus is flat, but the scan must not
-/// silently miss a subdir the day one appears. An empty corpus is a
+/// sorted by full path. The season-2 corpora live in subdirs (`s2/`,
+/// `s2fast/`), so a flat scan would miss them. An empty corpus is a
 /// deployment fault: bail loudly and let the pod crash-loop rather than
 /// publish a dead stream.
 fn scan_video_dir(dir: &str) -> Result<Vec<PathBuf>> {
