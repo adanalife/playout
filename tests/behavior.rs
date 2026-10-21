@@ -77,7 +77,13 @@ fn free_port() -> u16 {
     // before handing it out.
     use std::sync::atomic::{AtomicU16, Ordering};
     static NEXT: AtomicU16 = AtomicU16::new(0);
-    let base = 20_000 + (std::process::id() % 20_000) as u16;
+    // A plain pid salt overlaps the window of a sibling `cargo test` whose pid
+    // is a few higher, and the bind probe can't see a port it has claimed but
+    // not yet bound. The multiplier puts pids up to 300 apart at least 66
+    // ports apart, more than one run claims.
+    // shortcut: probabilistic for arbitrary pid gaps (~0.5% per concurrent
+    // pair); claim ports through lock files if parallel runs become routine.
+    let base = 20_000 + (u64::from(std::process::id()) * 10_299 % 20_000) as u16;
     loop {
         let port = base + NEXT.fetch_add(1, Ordering::Relaxed) % 20_000;
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
