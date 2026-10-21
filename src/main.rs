@@ -476,7 +476,24 @@ async fn run(platform: String, deployment_env: String) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_frame_gap, scan_video_dir, sends_to_sentry, tee_branches};
+    use super::{boot_mode, is_frame_gap, scan_video_dir, sends_to_sentry, tee_branches};
+
+    /// The boot mode is what a restart plays with no word from tripbot, and
+    /// the cold-boot clip is drawn from it: a mode matching no clip is a
+    /// random pick over nothing, a modulo-by-zero panic before first frame.
+    #[test]
+    fn boot_mode_always_matches_a_clip() {
+        let corpora = ["s1", "s1", "s2"];
+        assert_eq!(boot_mode("s1", &corpora), ["s1"]);
+        assert_eq!(boot_mode(" s2 ,s1", &corpora), ["s1", "s2"]);
+        // A corpus not mounted here, an unknown name, or nothing at all falls
+        // back to every corpus the playlist holds.
+        assert_eq!(boot_mode("s2fast", &corpora), ["s1", "s2"]);
+        assert_eq!(boot_mode("s3", &corpora), ["s1", "s2"]);
+        assert_eq!(boot_mode("", &corpora), ["s1", "s2"]);
+        // The default against a season-2-only mount.
+        assert_eq!(boot_mode("s1", &["s2fast"]), ["s2fast"]);
+    }
 
     #[test]
     fn only_prod_reports_to_sentry() {
