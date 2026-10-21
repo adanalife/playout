@@ -46,10 +46,10 @@ PARKED_DIRS = [f"{PARKED_MOUNT}/{c}/clips" for c in PARKED_CORPORA] + [
     f"{PARKED_MOUNT}/s2/pieces"
 ]
 
-# SM container holding playout's Sentry DSN, JSON shape {"SENTRY_DSN": "…"}.
+# SSM parameter holding playout's Sentry DSN, JSON shape {"SENTRY_DSN": "…"}.
 # Created on the infra side. One Sentry project per component; envs are
-# separated by the SENTRY_ENVIRONMENT tag (= ENV in the binary), so the same
-# DSN serves stage + prod.
+# separated by the environment tag (DEPLOYMENT_ENVIRONMENT in the binary), and
+# only prod sends: the binary skips Sentry init everywhere else.
 SENTRY_SM_KEY = "/k8s/sentry-playout"
 SENTRY_SECRET = "sentry-playout"
 
@@ -57,7 +57,7 @@ SENTRY_SECRET = "sentry-playout"
 def emit_sentry(scope: Construct, env: EnvConfig) -> None:
     """Per-namespace Sentry DSN secret, shared by every playout instance in
     the namespace and envFrom'd by each (emit once per env). ESO extracts the
-    SM JSON into a Secret via the env's namespaced SecretStore."""
+    SSM JSON into a Secret via the env's namespaced SecretStore."""
     _obj(
         scope,
         "sentry",
@@ -187,7 +187,7 @@ class PlayoutInstance(Construct):
     def __init__(
         self,
         scope: Construct,
-        platform: str,  # "twitch" | "youtube"
+        platform: str,  # one of platforms.json
         *,
         env: EnvConfig,
     ):

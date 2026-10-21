@@ -27,8 +27,8 @@ use tracing::{info, warn};
 use crate::SharedPlayer;
 
 /// NATS control-plane connection state, exported by the recorder as
-/// `playout_nats_connected`. Flipped by the connect result and async_nats
-/// connect/disconnect events (see `nats::connect`). Starts false: until the
+/// `playout_nats_connected`. Flipped by async_nats's connect/disconnect
+/// events (see `nats::connect`). Starts false: until the
 /// first successful connect the control plane is down and playback commands
 /// (find/goto/timewarp/skip) are silently dropped even though the corpus keeps
 /// looping — the exact boot-race this metric exists to surface.
