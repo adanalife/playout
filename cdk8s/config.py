@@ -39,7 +39,7 @@ SUPPORTED_PLATFORMS = _load_supported_platforms()
 # The canonical service-name / port / env-key vocabulary the fleet shares, owned
 # by tripbot (generated from its pkg/contract Go constants) and synced into this
 # repo's contract.json via `task contract:sync`. playout's Service name is what
-# tripbot's VLC_SERVER_HOST dials, so it comes from here rather than being
+# tripbot's PLAYOUT_HOST dials, so it comes from here rather than being
 # restated. Never hand-edit contract.json — change the Go constants + re-sync.
 _CONTRACT_FILE = Path(__file__).resolve().parents[1] / "contract.json"
 
