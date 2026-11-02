@@ -36,8 +36,8 @@ pub(crate) struct Player {
     /// Immutable playlist, sorted. Commands index into this.
     pub(crate) files: Vec<PathBuf>,
     /// Directories the console may preview clips from that are not in the
-    /// playlist — the pipeline's rendered clips for a corpus that doesn't air
-    /// here yet (`PARKED_DIRS`). Only `/frame` and `/clip` look in them;
+    /// playlist — the pipeline's rendered clips and split pieces for corpora that
+    /// don't air here yet (`PARKED_DIRS`). Only `/frame` and `/clip` look in them;
     /// nothing in a parked directory can be played on air.
     pub(crate) parked_dirs: Vec<PathBuf>,
     /// Corpus of each playlist entry, by index (see `corpus_of`).

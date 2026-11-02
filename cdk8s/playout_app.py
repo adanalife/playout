@@ -300,8 +300,8 @@ class PlayoutInstance(Construct):
             ],
             "env": [
                 # glibc gives each thread its own malloc arena and keeps what
-                # it frees; every /frame grab spins up decoder threads, so RSS
-                # stepped up per burst of grabs until the pod was OOMKilled.
+                # it frees; every /frame grab spins up decoder threads, so without a
+                # cap RSS climbs with each burst of grabs until the pod is OOMKilled.
                 {"name": "MALLOC_ARENA_MAX", "value": "2"},
             ],
             "volumeMounts": [
