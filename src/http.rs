@@ -318,6 +318,29 @@ mod tests {
     }
 
     #[test]
+    fn locate_takes_the_first_parked_dir_holding_the_name() {
+        // A rendered clip shares its split piece's name; the clip dirs are
+        // listed before the pieces dir so the rendered clip is the one served.
+        let root = std::env::temp_dir().join(format!("playout-parked-{}", std::process::id()));
+        let (clips, pieces) = (root.join("clips"), root.join("pieces"));
+        for d in [&clips, &pieces] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("both.MP4"), b"x").unwrap();
+        }
+        std::fs::write(pieces.join("piece-only.MP4"), b"x").unwrap();
+        let parked = vec![clips.clone(), pieces.clone()];
+        assert_eq!(
+            locate(&[], &parked, "both.MP4"),
+            Some(clips.join("both.MP4"))
+        );
+        assert_eq!(
+            locate(&[], &parked, "piece-only.MP4"),
+            Some(pieces.join("piece-only.MP4"))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn version_json_matches_contract() {
         let v = version_json();
         // The key names are the contract — the fleet's version discovery reads
