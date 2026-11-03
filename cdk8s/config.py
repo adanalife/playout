@@ -110,7 +110,7 @@ ENVS: dict[str, EnvConfig] = {
         # git state). Parking frees the instance's CPU request on the minipc.
         platforms=SUPPORTED_PLATFORMS,
         image_tag="latest",  # overridden by the versions.yaml pin
-        dashcam_claim="vlc-dashcam-local",  # corpus served off the minipc NVMe copy
+        dashcam_claim="vlc-dashcam-local",  # corpus copy on the minipc's T5 USB SSD
         cpu_request="2",
         priority_class="prod-stream",
         # Stream-copy the uniform corpus straight to MediaMTX. x264 is
