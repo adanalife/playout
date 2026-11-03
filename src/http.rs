@@ -119,9 +119,9 @@ async fn frame(
     }
 }
 
-/// A playlist clip's bytes, for the console's clip page to play. Named and
+/// A clip's bytes, for the console's clip page to play. Named and
 /// resolved like `/frame`, so an unknown name is a 404 and there is no path to
-/// traverse. Range requests are honoured, so a browser seeking to the moment
+/// traverse. Range requests are honored, so a browser seeking to the moment
 /// the page names reads only the bytes it plays — no decode, no encode, just
 /// the file off the mount.
 async fn clip(

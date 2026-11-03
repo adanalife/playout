@@ -11,7 +11,7 @@ on:
 
 # Only build the newest main merge: two close-together pushes would race to
 # tag :main and the older build finishing last would clobber it. (release.yml
-# is deliberately NOT guarded: cancelling could drop a version; immutable
+# is deliberately NOT guarded: canceling could drop a version; immutable
 # per-version tags are safe.)
 concurrency:
   group: dev-image
