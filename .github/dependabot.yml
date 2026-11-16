@@ -46,8 +46,6 @@ updates:
       rust:
         patterns:
           - "*"
-        exclude-patterns:
-          - "async-nats"
       rust-security:
         applies-to: security-updates
         patterns:
