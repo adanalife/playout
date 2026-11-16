@@ -169,6 +169,10 @@ fn main() -> Result<()> {
 
 #[tokio::main]
 async fn run(platform: String, deployment_env: String) -> Result<()> {
+    use sentry_tracing::{BreadcrumbLayer, ErrorLayer, SpanLayer};
+    use tracing::Level;
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::filter::{LevelFilter, filter_fn};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     tracing_subscriber::registry()
@@ -176,8 +180,14 @@ async fn run(platform: String, deployment_env: String) -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
-        // ERROR events become Sentry events; WARN/INFO attach as breadcrumbs.
-        .with(sentry_tracing::layer())
+        // INFO+ spans become Sentry spans, ERROR events become Sentry events, and
+        // WARN/INFO attach as breadcrumbs. The breadcrumb layer goes first so a
+        // breadcrumb lands on the event it precedes.
+        .with(SpanLayer::new().with_filter(LevelFilter::INFO))
+        .with(BreadcrumbLayer::new().with_filter(filter_fn(|metadata| {
+            matches!(*metadata.level(), Level::WARN | Level::INFO)
+        })))
+        .with(ErrorLayer::new().with_filter(LevelFilter::ERROR))
         .init();
     info!(version = VERSION, sha = SHA, "playout starting");
 
