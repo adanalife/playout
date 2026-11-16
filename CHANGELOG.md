@@ -2,6 +2,16 @@
 
 <!-- towncrier release notes start -->
 
+## [v1.5.1] — 2026-11-16
+
+### Security
+
+- Bump quinn-udp to 0.5.16 for RUSTSEC-2026-0538, a receive loop that can spin after a truncated datagram. ([#240](https://github.com/adanalife/playout/pull/240))
+
+### Misc
+
+- Correct the cdk8s comment naming where prod-1 serves the dashcam corpus from: the T5 USB SSD. ([#235](https://github.com/adanalife/playout/pull/235))
+
 ## [v1.5.0] — 2026-10-21
 
 ### Added
